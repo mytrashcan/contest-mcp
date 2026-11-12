@@ -17,6 +17,8 @@ EXPECTED_TOOLS = {
     "mark",
     "my_list",
     "check_eligibility",
+    "changes",
+    "digest",
 }
 
 

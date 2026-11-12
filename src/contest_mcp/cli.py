@@ -8,6 +8,7 @@ import json
 import sys
 
 from . import db, detail, eligibility, ics, profile, util
+from . import digest as digest_report
 from .http import Fetcher
 from .server import db_path, refresh_sources
 
@@ -48,6 +49,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             dday_max=args.dday,
             status=args.status,
             limit=args.limit,
+            sort=args.sort,
         )
         submitted = db.submitted_ids(conn)
     finally:
@@ -149,6 +151,40 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_digest(args: argparse.Namespace) -> int:
+    conn = _open()
+    try:
+        report = digest_report.build(conn, days=args.days, limit=args.limit, use_profile=not args.no_profile)
+    finally:
+        conn.close()
+    if args.json:
+        _print_json(report)
+        return 0
+    print(report["text"])
+    return 0
+
+
+def cmd_changes(args: argparse.Namespace) -> int:
+    conn = _open()
+    try:
+        rows = db.changes(conn, days=args.days)
+    finally:
+        conn.close()
+    if args.json:
+        _print_json(rows)
+        return 0
+    if not rows:
+        print(f"최근 {args.days}일 변경 없음")
+        return 0
+    labels = {"apply_end": "마감", "apply_start": "접수시작", "prize": "시상", "name": "제목"}
+    for row in rows:
+        print(f"[{row['seen_at']}] {labels.get(row['field'], row['field'])}: "
+              f"{row['old_value']} → {row['new_value']}")
+        print(f"    {row['name'] or row['contest_id']}  {row['url'] or ''}")
+    print(f"\n총 {len(rows)}건")
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     conn = _open()
     try:
@@ -230,6 +266,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--region")
     search.add_argument("--dday", type=int, default=45)
     search.add_argument("--status", default="open", choices=["open", "upcoming", "all"])
+    search.add_argument("--sort", default="dday", choices=["dday", "views_low", "views_high", "name"])
     search.add_argument("--limit", type=int, default=20)
     search.set_defaults(func=cmd_search)
 
@@ -246,6 +283,16 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", help="자격 판정 (프로필 대조)")
     check.add_argument("ident")
     check.set_defaults(func=cmd_check)
+
+    dig = sub.add_parser("digest", help="아침 브리핑 (D-N, 경쟁 약한 순)")
+    dig.add_argument("--days", type=int, default=7)
+    dig.add_argument("--limit", type=int, default=10)
+    dig.add_argument("--no-profile", action="store_true", help="프로필 무시(판정 없이)")
+    dig.set_defaults(func=cmd_digest)
+
+    chg = sub.add_parser("changes", help="최근 공고 변경(마감 연장·시상 변경)")
+    chg.add_argument("--days", type=int, default=7)
+    chg.set_defaults(func=cmd_changes)
 
     mark = sub.add_parser("mark", help="내 상태 기록")
     mark.add_argument("ident")

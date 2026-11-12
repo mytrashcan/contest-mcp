@@ -13,12 +13,38 @@
 
 | 툴 | 하는 일 |
 |---|---|
-| `search_contests` | 마감·분야·지역·검색어로 조회. 같은 공고가 여러 소스에 있으면 1건으로 묶고 출처를 함께 반환 |
+| `search_contests` | 마감·분야·지역·검색어로 조회. 같은 공고가 여러 소스에 있으면 1건으로 묶고 출처를 함께 반환. `sort=views_low` 면 **조회 적은 순(경쟁 약함)** |
 | `get_contest` | 상세 파싱: 자격·시상·배점·제출물·발표·문의 + 근거 문장 + 발표일 언급 |
 | `refresh` | 소스에서 목록 재수집 (아래 5개 소스) |
+| `changes` | 최근 감지된 **공고 변경**(마감 연장·시상 변경·제목 변경) |
+| `digest` | 아침 브리핑: D-N 이내를 경쟁 약한 순으로 + 제한 문구·변경·자격 배지 |
 | `deadlines` | 마감 일정 모으기, 옵션으로 `.ics` 캘린더 생성. 상세 원문에서 찾은 **발표일(추정)** 도 함께 넣음 |
 | `mark` / `my_list` | 제출·폐기·관심없음 기록과 조회 |
 | `check_eligibility` | 공고 자격을 내 프로필과 대조해 **학교·지역·나이·신분·팀** 5축으로 pass/fail/unknown 판정 |
+
+## 변경 감지 (`changes`)
+
+`refresh`가 매일 돌면서 **이전 값과 달라진 필드만** `change_log`에 남깁니다.
+대상은 마감일·접수시작·시상·제목 4개이고, 조회수·현황 문구는 매번 흔들려서 제외합니다.
+
+- 마감 연장(11/20 → 11/27), 상시 변경되는 시상 내역, 제목 수정이 잡힙니다.
+- 같은 전이(20→27)는 한 번만 기록되고, 되돌림(27→20)은 따로 기록됩니다.
+- 상세 원문 날짜가 배지 날짜를 이기는 경우는 `basis=detail`로 표시해 '변경'이 아니라 '정정'임을 구분합니다.
+
+## 아침 브리핑 (`digest`)
+
+프로필 없이도 동작합니다. **조회수가 낮은(= 경쟁이 약한) 순**으로 D-N 후보를 세우고,
+각 항목에 `조회 등급 · 제한 문구 · 변경 · 자격` 배지를 붙입니다.
+
+```
+[contest-mcp] 2026-11-13 기준 D-7 이내 4건
+1. D-5 · 제1회 순천시 청년정책 숏폼 공모전
+   조회 3 (낮음) · 제한: 참가자격 대학생 대학원생 일반인
+2. D-4 · ...
+```
+
+프로필이 있으면 `자격 O` / `자격 X(region)` 배지가 추가됩니다. 축을 하나도 확정하지 못한 공고는
+배지를 붙이지 않습니다(전부 `?`면 정보가 아니므로).
 
 ## 자격 판정 (`check_eligibility`)
 
@@ -90,7 +116,11 @@ DB는 기본 `~/.contest-mcp/db.sqlite`이고 `CONTEST_MCP_DB`로 바꿀 수 있
 export PYTHONPATH=src
 python -m contest_mcp.cli refresh --pages 5          # 수집
 python -m contest_mcp.cli search --query AI --dday 30 # 검색
+python -m contest_mcp.cli search --sort views_low --dday 30   # 경쟁 약한 순
 python -m contest_mcp.cli detail wevity:112316        # 상세 원문 파싱
+python -m contest_mcp.cli check wevity:112316         # 자격 판정
+python -m contest_mcp.cli changes --days 7            # 최근 변경(마감 연장 등)
+python -m contest_mcp.cli digest --days 7             # 아침 브리핑
 python -m contest_mcp.cli deadlines --days 14 --ics ~/Downloads/contest.ics
 python -m contest_mcp.cli mark wevity:112316 submitted --note "11/12 접수"
 ```
@@ -130,7 +160,7 @@ python -m contest_mcp.cli mark wevity:112316 submitted --note "11/12 접수"
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest      # 49 tests, 네트워크 없이 파서·DB·ICS·자격 판정 검증
+.venv/bin/python -m pytest      # 66 tests, 네트워크 없이 파서·DB·ICS·자격·변경·브리핑 검증
 ```
 
 ## 라이선스

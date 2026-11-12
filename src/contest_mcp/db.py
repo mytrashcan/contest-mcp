@@ -47,7 +47,21 @@ CREATE TABLE IF NOT EXISTS source_run (
     kept      INTEGER,
     error     TEXT
 );
+CREATE TABLE IF NOT EXISTS change_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    contest_id TEXT NOT NULL,
+    seen_at    TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    basis      TEXT,
+    UNIQUE(contest_id, field, old_value, new_value)
+);
+CREATE INDEX IF NOT EXISTS idx_change_seen ON change_log(seen_at);
 """
+
+# 변경 감지 대상. 조회수(views)·현황 문구(status_raw)는 매번 흔들려서 제외한다.
+TRACKED_FIELDS = ("name", "apply_start", "apply_end", "prize")
 
 BASIS_RANK = {"badge": 0, "list": 1, "detail": 2}
 MIN_MERGE_TOKENS = 3
@@ -107,7 +121,8 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
             continue
         fresh = _row(record, ref)
         existing = conn.execute(
-            "SELECT apply_end, apply_end_basis FROM contest WHERE id = ?", (fresh["id"],)
+            "SELECT name, apply_start, apply_end, apply_end_basis, prize FROM contest WHERE id = ?",
+            (fresh["id"],),
         ).fetchone()
         if existing is None:
             columns = ", ".join(fresh)
@@ -121,6 +136,14 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
         if existing["apply_end"] and old_rank > new_rank:
             fresh["apply_end"] = existing["apply_end"]
             fresh["apply_end_basis"] = existing["apply_end_basis"]
+
+        for field in TRACKED_FIELDS:
+            old_value = existing[field]
+            new_value = fresh.get(field)
+            if not old_value or not new_value or old_value == new_value:
+                continue
+            _log_change(conn, fresh["id"], field, old_value, new_value, fresh["apply_end_basis"], ref)
+
         assignments = ", ".join(f"{column} = ?" for column in fresh if column not in {"id", "first_seen"})
         values = [value for column, value in fresh.items() if column not in {"id", "first_seen"}]
         conn.execute(
@@ -130,6 +153,37 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
         stats["updated"] += 1
     conn.commit()
     return stats
+
+
+def _log_change(
+    conn: sqlite3.Connection,
+    contest_id: str,
+    field: str,
+    old_value: str,
+    new_value: str,
+    basis: str | None,
+    seen_at: dt.date,
+) -> None:
+    """필드가 실제로 바뀌었을 때만 기록(같은 전이 재기록은 UNIQUE가 막는다)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO change_log (contest_id, seen_at, field, old_value, new_value, basis) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (contest_id, seen_at.isoformat(), field, old_value, new_value, basis),
+    )
+
+
+def changes(conn: sqlite3.Connection, *, days: int = 7, base: dt.date | None = None) -> list[dict]:
+    """최근 ``days`` 일 안에 감지된 공고 변경(마감 연장·시상 변경·제목 변경 등)."""
+    ref = base or util.today()
+    since = (ref - dt.timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT g.contest_id, g.seen_at, g.field, g.old_value, g.new_value, g.basis, "
+        "       c.name, c.url, c.source "
+        "FROM change_log g LEFT JOIN contest c ON c.id = g.contest_id "
+        "WHERE g.seen_at >= ? ORDER BY g.seen_at DESC, g.id DESC",
+        (since,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _group(rows: list[sqlite3.Row], base: dt.date) -> list[dict]:
@@ -226,9 +280,13 @@ def search(
     dday_max: int | None = 45,
     status: str = "open",
     limit: int = 20,
+    sort: str = "dday",
     base: dt.date | None = None,
 ) -> list[dict]:
-    """그룹 중복을 제거한 검색. ``status='all'`` 이면 마감 포함."""
+    """그룹 중복을 제거한 검색. ``status='all'`` 이면 마감 포함.
+
+    ``sort``: ``dday``(마감 임박) · ``views_low``(조회 적은 순 = 경쟁 약함) · ``views_high`` · ``name``.
+    """
     ref = base or util.today()
     clauses: list[str] = []
     params: list[object] = []
@@ -259,7 +317,14 @@ def search(
         grouped = [item for item in grouped if item["status"] == "upcoming"]
     if dday_max is not None:
         grouped = [item for item in grouped if item["dday"] is None or item["dday"] <= dday_max]
-    grouped.sort(key=lambda item: (item["dday"] is None, item["dday"] or 10**6))
+    if sort == "views_low":
+        grouped.sort(key=lambda item: (item["views"] is None, item["views"] or 0, item["dday"] or 10**6))
+    elif sort == "views_high":
+        grouped.sort(key=lambda item: (item["views"] is None, -(item["views"] or 0)))
+    elif sort == "name":
+        grouped.sort(key=lambda item: item["name"])
+    else:
+        grouped.sort(key=lambda item: (item["dday"] is None, item["dday"] or 10**6))
     return grouped[:limit]
 
 

@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from . import db, detail, eligibility, ics, profile, util
+from . import digest as digest_report
 from .http import DEFAULT_INSECURE_HOSTS, Fetcher
 from .sources import SOURCES
 
@@ -100,6 +101,7 @@ def build_server():
         dday_max: int = 45,
         status: str = "open",
         limit: int = 20,
+        sort: str = "dday",
     ) -> dict:
         """공모전을 검색한다 (같은 공고는 여러 소스에 있어도 1건으로 묶인다).
 
@@ -110,6 +112,7 @@ def build_server():
             dday_max: 마감까지 남은 일수 상한. 45면 6주 안에 마감하는 것만.
             status: open(진행·예정) | upcoming(접수 전) | all(마감 포함).
             limit: 최대 반환 건수.
+            sort: dday(마감 임박) | views_low(조회 적은 순 = 경쟁 약함) | views_high | name.
         """
         conn = _connect()
         try:
@@ -121,11 +124,12 @@ def build_server():
                 dday_max=dday_max,
                 status=status,
                 limit=limit,
+                sort=sort,
             )
             submitted = db.submitted_ids(conn)
             for item in items:
                 item["already_submitted"] = item["id"] in submitted
-            return {"count": len(items), "items": items}
+            return {"count": len(items), "sort": sort, "items": items}
         finally:
             conn.close()
 
@@ -307,6 +311,39 @@ def build_server():
                 "text_chars": len(text),
                 **result,
             }
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def changes(days: int = 7) -> dict:
+        """최근 감지된 공고 변경(마감 연장·시상 변경·제목 변경)을 보여준다.
+
+        `refresh`가 매일 돌면서 이전 값과 달라진 항목만 기록한다.
+
+        Args:
+            days: 며칠 전까지의 변경을 볼지 (기본 7).
+        """
+        conn = _connect()
+        try:
+            rows = db.changes(conn, days=days)
+            return {"days": days, "count": len(rows), "items": rows}
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def digest(days: int = 7, limit: int = 10) -> dict:
+        """아침 브리핑: D-N 이내 후보를 **경쟁 약한 순(조회 적은 순)** 으로 정리한다.
+
+        각 항목에 조회수 등급, 원문 제한 문구, 최근 변경, (프로필이 있으면) 자격 판정을 붙인다.
+        프로필이 없어도 동작하며, 그때는 판정 대신 제한 문구 유무만 표시한다.
+
+        Args:
+            days: 마감까지 남은 일수 기준 (기본 7).
+            limit: 최대 건수.
+        """
+        conn = _connect()
+        try:
+            return digest_report.build(conn, days=days, limit=limit)
         finally:
             conn.close()
 
