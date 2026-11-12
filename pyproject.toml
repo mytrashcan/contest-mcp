@@ -29,3 +29,15 @@ packages = ["src/contest_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# ruff 기본 규칙은 버전마다 바뀐다. CI와 로컬이 같은 결과를 내도록 명시한다.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트의 HTML/JSON 픽스처는 원문 줄바꿈을 그대로 두는 편이 안전하다.
+"tests/*" = ["E501"]

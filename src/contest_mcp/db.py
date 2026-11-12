@@ -94,7 +94,9 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
         if not record.get("name"):
             continue
         fresh = _row(record, ref)
-        existing = conn.execute("SELECT apply_end, apply_end_basis FROM contest WHERE id = ?", (fresh["id"],)).fetchone()
+        existing = conn.execute(
+            "SELECT apply_end, apply_end_basis FROM contest WHERE id = ?", (fresh["id"],)
+        ).fetchone()
         if existing is None:
             columns = ", ".join(fresh)
             placeholders = ", ".join("?" * len(fresh))
@@ -250,10 +252,17 @@ def save_detail(
     conn.commit()
 
 
-def set_state(conn: sqlite3.Connection, contest_id: str, state: str, note: str = "", base: dt.date | None = None) -> None:
+def set_state(
+    conn: sqlite3.Connection,
+    contest_id: str,
+    state: str,
+    note: str = "",
+    base: dt.date | None = None,
+) -> None:
     conn.execute(
         "INSERT INTO my_list (contest_id, state, note, updated_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(contest_id) DO UPDATE SET state = excluded.state, note = excluded.note, updated_at = excluded.updated_at",
+        "ON CONFLICT(contest_id) DO UPDATE SET "
+        "state = excluded.state, note = excluded.note, updated_at = excluded.updated_at",
         (contest_id, state, note, (base or util.today()).isoformat()),
     )
     conn.commit()

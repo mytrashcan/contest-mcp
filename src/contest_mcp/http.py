@@ -110,7 +110,8 @@ class Fetcher:
         self._wait(parsed.netloc)
         request = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **headers})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=self._context(parsed.netloc)) as response:
+            context = self._context(parsed.netloc)
+            with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             raise FetchError(f"HTTP {exc.code} {url}") from exc

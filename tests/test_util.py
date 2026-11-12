@@ -4,7 +4,6 @@ import datetime as dt
 
 from contest_mcp import util
 
-
 BASE = dt.date(2026, 11, 12)
 
 
