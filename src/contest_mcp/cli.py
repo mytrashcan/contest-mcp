@@ -136,7 +136,8 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
             for event in announcements
         ]
         path = ics.write(events, args.ics)
-        print(f"ICS 저장: {path} (마감 {len(items)}건 중 {len(items) - sum(1 for i in items if not i['apply_end'])}건 + 발표 추정 {len(announcements)}건)")
+        dated = len(items) - sum(1 for item in items if not item["apply_end"])
+        print(f"ICS 저장: {path} (마감 {dated}건 + 발표 추정 {len(announcements)}건)")
         return 0
     for item in items:
         print(f"D-{item['dday']:>3} {item['apply_end']} | {item['name'][:60]}")
