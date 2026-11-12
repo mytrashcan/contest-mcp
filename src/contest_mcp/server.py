@@ -8,10 +8,11 @@ DB 경로: ``CONTEST_MCP_DB`` 환경변수 또는 ``~/.contest-mcp/db.sqlite``.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from pathlib import Path
 
-from . import db, detail, ics, util
+from . import db, detail, eligibility, ics, profile, util
 from .http import DEFAULT_INSECURE_HOSTS, Fetcher
 from .sources import SOURCES
 
@@ -166,13 +167,22 @@ def build_server():
         return refresh_sources(sources, max_pages=max_pages)
 
     @mcp.tool()
-    def deadlines(days: int = 30, ics_path: str | None = None, dday_max: int | None = None) -> dict:
+    def deadlines(
+        days: int = 30,
+        ics_path: str | None = None,
+        dday_max: int | None = None,
+        include_announcements: bool = True,
+    ) -> dict:
         """마감 일정을 모은다. `ics_path` 를 주면 ICS 파일도 만든다.
+
+        `include_announcements` 는 상세 원문에서 찾은 **발표일(추정)** 을 함께 넣는다.
+        원문 문장에서 뽑은 값이라 ICS 제목에 `[발표?]` 로 표시하고, 근거 문장을 설명에 붙인다.
 
         Args:
             days: 앞으로 며칠 안의 마감만 (기본 30).
             ics_path: ICS를 저장할 경로 (예: ~/Downloads/contest.ics).
             dday_max: days 대신 남은 일수 상한을 직접 지정.
+            include_announcements: 상세에서 찾은 발표일(추정)도 캘린더에 넣을지.
         """
         conn = _connect()
         try:
@@ -188,7 +198,34 @@ def build_server():
                 for item in items
                 if item["apply_end"]
             ]
-            result = {"days": limit_days, "count": len(items), "items": items}
+            today = util.today()
+            horizon = (today + dt.timedelta(days=limit_days)).isoformat()
+            announcements = []
+            if include_announcements:
+                announcements = [
+                    event
+                    for event in db.detail_dates(conn, kinds=("announce",))
+                    if today.isoformat() <= event["date"] <= horizon
+                ]
+                events += [
+                    {
+                        "date": event["date"],
+                        "summary": f"[발표?] {event['name']}",
+                        "description": f"{event['host'] or ''} · 원문 언급: {event['evidence'] or ''}".strip(),
+                        "url": event["url"],
+                        "uid": f"announce-{event['contest_id']}-{event['date']}",
+                    }
+                    for event in announcements
+                ]
+            result = {
+                "days": limit_days,
+                "count": len(items),
+                "items": items,
+                "announcements": announcements,
+                "announcement_note": "발표일은 공고 원문 문장에서 뽑은 추정값입니다. ICS에는 [발표?]로 표시됩니다."
+                if include_announcements
+                else None,
+            }
             if ics_path and events:
                 result["ics"] = str(ics.write(events, ics_path))
                 result["ics_events"] = len(events)
@@ -228,6 +265,48 @@ def build_server():
         try:
             rows = db.my_list(conn, state)
             return {"count": len(rows), "items": rows}
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def check_eligibility(ident: str) -> dict:
+        """공고의 응모 자격을 프로필(`~/.contest-mcp/profile.json`)과 대조해 축별로 판정한다.
+
+        판정은 pass/fail/unknown 세 가지이며, **원문 문장 근거가 있을 때만** pass/fail을 준다.
+        학교·지역(주민등록지 기준)·나이·신분·팀 구성 5축을 본다. 프로필이 없으면 unknown이 정상이다.
+
+        Args:
+            ident: contest id, 상세 URL, 또는 ix·contest_pk.
+        """
+        conn = _connect()
+        try:
+            item = db.get(conn, ident)
+            if item is None:
+                return {"found": False, "ident": ident, "hint": "먼저 refresh로 목록을 수집하세요."}
+            if not item.get("detail"):
+                try:
+                    parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
+                    item["detail"] = parsed
+                except Exception as exc:
+                    return {"found": True, "id": item["id"], "name": item["name"], "error": f"상세 파싱 실패: {exc}"}
+            detail_data = item.get("detail") or {}
+            fields = detail_data.get("fields") or {}
+            parts = [fields[key]["evidence"] for key in ("eligibility", "award", "submission") if key in fields]
+            parts.append(detail_data.get("summary") or "")
+            text = " ".join(part for part in parts if part)
+            user_profile = profile.load()
+            result = eligibility.check(text, user_profile)
+            return {
+                "found": True,
+                "id": item["id"],
+                "name": item["name"],
+                "url": item["url"],
+                "apply_end": item["apply_end"],
+                "profile_fields_used": sorted(key for key in user_profile if key != "note"),
+                "text_chars": len(text),
+                **result,
+            }
         finally:
             conn.close()
 

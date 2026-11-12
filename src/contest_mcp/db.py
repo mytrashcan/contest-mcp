@@ -357,3 +357,40 @@ def record_run(
 
 def runs(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in conn.execute("SELECT * FROM source_run ORDER BY source")]
+
+
+def detail_dates(conn: sqlite3.Connection, *, kinds: tuple[str, ...] = ("announce",)) -> list[dict]:
+    """상세 파싱에서 얻은 날짜 언급을 이벤트 후보로 꺼낸다.
+
+    '발표'(announce)만 캘린더 승격 대상이다. 심사·시상은 참고 라벨이라 기본값에서 뺀다.
+    """
+    rows = conn.execute(
+        "SELECT id, name, host, url, detail_json FROM contest WHERE detail_json IS NOT NULL"
+    ).fetchall()
+    events: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        try:
+            detail = json.loads(row["detail_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for mention in detail.get("date_mentions") or []:
+            if mention.get("kind") not in kinds or not mention.get("date"):
+                continue
+            key = (row["id"], mention["date"], mention["kind"])
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append(
+                {
+                    "contest_id": row["id"],
+                    "name": row["name"],
+                    "host": row["host"],
+                    "url": row["url"],
+                    "date": mention["date"],
+                    "kind": mention["kind"],
+                    "label": mention.get("label"),
+                    "evidence": mention.get("evidence"),
+                }
+            )
+    return sorted(events, key=lambda event: (event["date"], event["name"]))

@@ -9,7 +9,15 @@ import pytest
 
 BASE = dt.date(2026, 11, 12)
 
-EXPECTED_TOOLS = {"search_contests", "get_contest", "refresh", "deadlines", "mark", "my_list"}
+EXPECTED_TOOLS = {
+    "search_contests",
+    "get_contest",
+    "refresh",
+    "deadlines",
+    "mark",
+    "my_list",
+    "check_eligibility",
+}
 
 
 def test_build_server_registers_expected_tools():

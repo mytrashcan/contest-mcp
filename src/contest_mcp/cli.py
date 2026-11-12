@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sys
 
-from . import db, detail, ics
+from . import db, detail, eligibility, ics, profile, util
 from .http import Fetcher
 from .server import db_path, refresh_sources
 
@@ -102,6 +103,15 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
     conn = _open()
     try:
         items = db.search(conn, dday_max=args.days, status="open", limit=200)
+        announcements = []
+        if not args.no_announce:
+            today = util.today()
+            horizon = (today + dt.timedelta(days=args.days)).isoformat()
+            announcements = [
+                event
+                for event in db.detail_dates(conn, kinds=("announce",))
+                if today.isoformat() <= event["date"] <= horizon
+            ]
     finally:
         conn.close()
     if args.ics:
@@ -115,12 +125,62 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
             for item in items
             if item["apply_end"]
         ]
+        events += [
+            {
+                "date": event["date"],
+                "summary": f"[발표?] {event['name']}",
+                "description": f"{event['host'] or ''} · 원문 언급: {event['evidence'] or ''}".strip(),
+                "url": event["url"],
+                "uid": f"announce-{event['contest_id']}-{event['date']}",
+            }
+            for event in announcements
+        ]
         path = ics.write(events, args.ics)
-        print(f"ICS 저장: {path} (이벤트 {len(events)}건)")
+        print(f"ICS 저장: {path} (마감 {len(items)}건 중 {len(items) - sum(1 for i in items if not i['apply_end'])}건 + 발표 추정 {len(announcements)}건)")
         return 0
     for item in items:
         print(f"D-{item['dday']:>3} {item['apply_end']} | {item['name'][:60]}")
-    print(f"\n{args.days}일 내 마감 {len(items)}건")
+    if announcements:
+        print("\n발표일(원문 추정):")
+        for event in announcements:
+            print(f"  {event['date']} {event['name'][:50]} — {(event['evidence'] or '')[:60]}")
+    print(f"\n{args.days}일 내 마감 {len(items)}건 / 발표 추정 {len(announcements)}건")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    conn = _open()
+    try:
+        item = db.get(conn, args.ident)
+        if item is None:
+            print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
+            return 1
+        if not item.get("detail"):
+            parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+            db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
+            item["detail"] = parsed
+    finally:
+        conn.close()
+    detail_data = item.get("detail") or {}
+    fields = detail_data.get("fields") or {}
+    parts = [fields[key]["evidence"] for key in ("eligibility", "award", "submission") if key in fields]
+    parts.append(detail_data.get("summary") or "")
+    text = " ".join(part for part in parts if part)
+    user_profile = profile.load()
+    result = eligibility.check(text, user_profile)
+    if args.json:
+        _print_json({**result, "profile": user_profile, "name": item["name"]})
+        return 0
+    print(f"{item['name']}\n{item['url']}")
+    if not user_profile:
+        print("! 프로필 없음 → ~/.contest-mcp/profile.json 을 만들면 판정이 채워집니다")
+    print(f"\n종합: {result['overall']}")
+    for axis in result["axes"]:
+        mark = {"pass": "O", "fail": "X", "unknown": "?"}[axis["verdict"]]
+        print(f"  [{mark}] {axis['axis']}: {axis['reason']}")
+        if axis["evidence"]:
+            print(f"      근거: {axis['evidence'][:120]}")
+    print(f"\n{result['note']}")
     return 0
 
 
@@ -179,7 +239,12 @@ def build_parser() -> argparse.ArgumentParser:
     deadlines = sub.add_parser("deadlines", help="마감 일정 / ICS 생성")
     deadlines.add_argument("--days", type=int, default=30)
     deadlines.add_argument("--ics", help="ICS 저장 경로")
+    deadlines.add_argument("--no-announce", action="store_true", help="발표일(추정) 제외")
     deadlines.set_defaults(func=cmd_deadlines)
+
+    check = sub.add_parser("check", help="자격 판정 (프로필 대조)")
+    check.add_argument("ident")
+    check.set_defaults(func=cmd_check)
 
     mark = sub.add_parser("mark", help="내 상태 기록")
     mark.add_argument("ident")

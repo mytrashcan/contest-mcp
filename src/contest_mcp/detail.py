@@ -40,6 +40,20 @@ _DATE_CONTEXT = re.compile(
     r"(발표|결과\s*발표|심사|본선|시상식|시상)[^0-9\n]{0,30}?"
     r"((?:20\d{2}\s*[.\-/년]\s*)?\d{1,2}\s*[.\-/월]\s*\d{1,2})"
 )
+# 발표일(결과 발표)만 캘린더 승격 대상으로 삼는다. 심사·시상은 참고용 라벨.
+_KIND = (
+    ("발표", "announce"),
+    ("심사", "review"),
+    ("본선", "review"),
+    ("시상", "award"),
+)
+
+
+def _kind_of(label: str) -> str:
+    for token, kind in _KIND:
+        if token in label:
+            return kind
+    return "review"
 
 
 def parse(html: str, url: str = "", base=None) -> dict:
@@ -82,6 +96,7 @@ def parse(html: str, url: str = "", base=None) -> dict:
             date_mentions.append(
                 {
                     "label": match.group(1),
+                    "kind": _kind_of(match.group(1)),
                     "date": parsed,
                     "evidence": mention_text[match.start() : match.start() + 90].strip(),
                 }
