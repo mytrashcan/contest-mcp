@@ -1,0 +1,8 @@
+{
+  "school": "경북대학교",
+  "region": "대구",
+  "status": "학부생",
+  "age": 24,
+  "team_available": true,
+  "_note": "이 파일을 ~/.contest-mcp/profile.json 으로 복사한 뒤 네 값으로 고치세요. age는 만 나이(숫자), team_available은 함께 낼 팀을 꾸릴 수 있으면 true. region은 주민등록지 기준이며 학교 소재지로 갈음되지 않습니다."
+}

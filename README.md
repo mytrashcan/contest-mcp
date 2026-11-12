@@ -22,17 +22,21 @@
 
 ## 자격 판정 (`check_eligibility`)
 
-`~/.contest-mcp/profile.json` 을 만들어 두면 자격을 축별로 판정합니다.
+공고의 "지원 자격" 문장과 **내 조건**을 비교하려면, 내 조건을 어딘가 적어둬야 합니다.
+그 5줄짜리 메모가 프로필 파일입니다. 없으면 판정은 전부 `unknown`으로 나옵니다(틀린 판정보다 낫습니다).
 
-```json
-{
-  "school": "경북대학교",
-  "region": "대구",
-  "status": "학부생",
-  "age": 24,
-  "team_available": true
-}
+```bash
+cp profile.example.json ~/.contest-mcp/profile.json
+# 그리고 ~/.contest-mcp/profile.json 을 열어 내 값으로 고치기
 ```
+
+| 키 | 뜻 | 예 |
+|---|---|---|
+| `school` | 다니는 학교 | `경북대학교` |
+| `region` | **주민등록지** 기준 광역 지역 (학교 소재지 아님) | `대구` |
+| `status` | 신분 | `학부생` / `대학원생` / `일반인` |
+| `age` | 만 나이 (숫자) | `24` |
+| `team_available` | 함께 낼 팀을 꾸릴 수 있는지 | `true` |
 
 원칙은 **근거 없으면 unknown** 입니다.
 
