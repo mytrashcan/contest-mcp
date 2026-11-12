@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from . import db, detail, ics, util
+from . import db, detail, ics
 from .http import Fetcher
 from .server import db_path, refresh_sources
 

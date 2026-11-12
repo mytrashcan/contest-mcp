@@ -59,9 +59,11 @@ def build(events: list[dict], *, alarm_days: int = 2, stamp: dt.date | None = No
         description = event.get("description") or ""
         if event.get("url"):
             description = f"{description}\n{event['url']}".strip()
+        summary = event.get("summary") or ""
+        uid_seed = event.get("uid") or f"{date}-{summary}"
         lines += [
             "BEGIN:VEVENT",
-            f"UID:{_escape(event.get('uid') or f'{date}-{event.get('summary', '')}')}@contest-mcp",
+            f"UID:{_escape(uid_seed)}@contest-mcp",
             f"DTSTAMP:{now}",
             f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}",
             f"DTEND;VALUE=DATE:{(start + dt.timedelta(days=1)).strftime('%Y%m%d')}",
