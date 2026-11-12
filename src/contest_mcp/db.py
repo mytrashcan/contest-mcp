@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS source_run (
 """
 
 BASIS_RANK = {"badge": 0, "list": 1, "detail": 2}
+MIN_MERGE_TOKENS = 3
+
+
+def _mergeable(left: set[str], right: set[str]) -> bool:
+    """한쪽 이름의 의미 토큰이 다른 쪽에 통째로 들어 있으면 같은 공고로 본다.
+
+    토큰이 3개 미만인 짧은 이름은 오병합 위험이 커서 묶지 않는다.
+    """
+    if not left or not right:
+        return False
+    small, big = (left, right) if len(left) <= len(right) else (right, left)
+    return len(small) >= MIN_MERGE_TOKENS and small <= big
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -121,10 +133,50 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
 
 
 def _group(rows: list[sqlite3.Row], base: dt.date) -> list[dict]:
-    """group_id 단위로 묶어 대표 1건 + 출처 목록으로 만든다."""
+    """같은 공고를 하나로 묶는다: (1) 이름 정규화 해시 동일, (2) 토큰 포함관계.
+
+    (2)는 주최명이 제목 앞에 붙어 이름이 달라진 경우를 잡는다
+    (예: ``한국보건의료정보원 2026년 제6회 진료정보교류 …`` ⊃ ``제6회 진료정보교류 …``).
+    짧은 이름이 우연히 포함되는 오병합을 막으려고 토큰 3개 이상일 때만 인정한다.
+    """
+    parent = {row["id"]: row["id"] for row in rows}
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    by_group: dict[str, list[str]] = {}
+    for row in rows:
+        if row["group_id"]:
+            by_group.setdefault(row["group_id"], []).append(row["id"])
+    for ids in by_group.values():
+        for other in ids[1:]:
+            union(ids[0], other)
+
+    tokens = {row["id"]: util.name_tokens(row["name"]) for row in rows}
+    index: dict[str, list[str]] = {}
+    for rid, token_set in tokens.items():
+        for token in token_set:
+            index.setdefault(token, []).append(rid)
+    for rid, token_set in tokens.items():
+        candidates: set[str] = set()
+        for token in token_set:
+            candidates.update(index.get(token, ()))
+        candidates.discard(rid)
+        for other in candidates:
+            if _mergeable(token_set, tokens[other]):
+                union(rid, other)
+
     buckets: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        buckets.setdefault(row["group_id"] or row["id"], []).append(row)
+        buckets.setdefault(find(row["id"]), []).append(row)
 
     grouped: list[dict] = []
     for group_rows in buckets.values():

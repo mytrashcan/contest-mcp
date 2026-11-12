@@ -50,6 +50,7 @@ def clean(text: object) -> str:
     for entity, char in ENTITIES.items():
         out = out.replace(entity, char)
     out = _TAG.sub(" ", out)
+    out = out.replace("\ufeff", "").replace("\u200b", "")
     return _WS.sub(" ", out).strip()
 
 
@@ -64,6 +65,45 @@ def group_id(name: str) -> str:
     """같은 공고가 여러 소스에 있어도 묶이도록 만드는 키."""
     normalized = norm_name(name)
     return hashlib.sha1(normalized.encode()).hexdigest()[:12] if normalized else ""
+
+
+# 병합 판정에서 무시하는 토큰: 어디에나 붙는 행정·홍보 단어와 연도·회차 표기.
+_STOPWORDS = frozenset(
+    {
+        "공모",
+        "공모전",
+        "대회",
+        "경진대회",
+        "모집",
+        "공고",
+        "안내",
+        "참가",
+        "참여",
+        "신청",
+        "접수",
+        "개최",
+        "이벤트",
+        "부문",
+        "대상",
+        "작품",
+        "콘테스트",
+        "챌린지",
+        "시즌",
+    }
+)
+_TOKEN = re.compile(r"[0-9a-z]+|[가-힣]+")
+_YEAR = re.compile(r"^(?:20\d{2}|19\d{2})$")
+_ROUND = re.compile(r"^제?\d+회?$")
+
+
+def name_tokens(name: str) -> set[str]:
+    """병합 판정용 의미 토큰. 연도·회차·홍보성 단어를 버린다."""
+    tokens: set[str] = set()
+    for token in _TOKEN.findall(clean(name).lower()):
+        if len(token) < 2 or token in _STOPWORDS or _YEAR.match(token) or _ROUND.match(token):
+            continue
+        tokens.add(token)
+    return tokens
 
 
 def parse_date(value: object, base: dt.date | None = None) -> str | None:

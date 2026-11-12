@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from . import allcon, thinkgood, wevity
+from . import allcon, contestkorea, linkareer, thinkgood, wevity
 
-SOURCES = {
-    wevity.NAME: wevity,
-    thinkgood.NAME: thinkgood,
-    allcon.NAME: allcon,
-}
+MODULES = (wevity, thinkgood, allcon, linkareer, contestkorea)
 
-__all__ = ["SOURCES", "allcon", "thinkgood", "wevity"]
+SOURCES = {module.NAME: module for module in MODULES}
+
+__all__ = ["MODULES", "SOURCES", "allcon", "contestkorea", "linkareer", "thinkgood", "wevity"]
