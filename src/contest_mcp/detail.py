@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from . import util
+from . import attachments, util
 
 LABELS: dict[str, tuple[str, ...]] = {
     "eligibility": (
@@ -17,11 +17,17 @@ LABELS: dict[str, tuple[str, ...]] = {
         "지원 자격",
         "참가자격",
         "참가 자격",
+        "참가대상",
+        "참가 대상",
+        "지원대상",
+        "지원 대상",
         "응모자격",
         "응모 자격",
         "모집대상",
         "참여대상",
         "응모대상",
+        "자격요건",
+        "자격 요건",
     ),
     "award": ("시상내역", "시상 내역", "시상규모", "시상 규모", "포상내역", "상금"),
     "scoring": ("배점", "심사기준", "심사 기준", "평가항목", "평가 항목", "심사항목", "심사 항목"),
@@ -56,6 +62,20 @@ def _kind_of(label: str) -> str:
     return "review"
 
 
+def _find_label(body: str, label: str) -> int | None:
+    """라벨 위치를 찾되, 네비게이션 잔재('참가대상 | 주최.주관 | 총상금')는 건너뛴다."""
+    start = 0
+    while True:
+        index = body.find(label, start)
+        if index < 0:
+            return None
+        tail = body[index + len(label) : index + len(label) + 80].lstrip(" :：-·")
+        looks_like_nav = not tail or len(tail) < 4 or tail.startswith(("|", "주최", "총상금", "홈페이지"))
+        if not looks_like_nav:
+            return index
+        start = index + len(label)
+
+
 def parse(html: str, url: str = "", base=None) -> dict:
     """상세 HTML → 구조화된 요약 + 근거 문장."""
     ref = base or util.today()
@@ -73,8 +93,8 @@ def parse(html: str, url: str = "", base=None) -> dict:
         for label in labels:
             hit = None
             for source_text in haystacks:
-                index = source_text.find(label)
-                if index >= 0:
+                index = _find_label(source_text, label)
+                if index is not None:
                     hit = source_text[index : index + 240].strip()
                     break
             if hit:
@@ -103,6 +123,7 @@ def parse(html: str, url: str = "", base=None) -> dict:
             )
 
     missing = [key for key in LABELS if key not in found]
+    presented = _presentation(text, summary)
     return {
         "url": url,
         "title": title,
@@ -111,8 +132,67 @@ def parse(html: str, url: str = "", base=None) -> dict:
         "date_mentions": date_mentions,
         "fields": found,
         "missing": missing,
+        "presentation": presented,
+        "attachments": attachments.extract_links(html, url)[:5],
         "text_chars": len(text),
     }
+
+
+# 발표(본선·피칭) 관련 문구 탐지. '참석 필수' 판정이 아니라 **문구가 있는지**만 본다.
+# '발표'만으로 잡으면 "수상자 발표" 같은 네비게이션 문구가 걸려 오탐이 난다 → 복합 표현만 인정한다.
+PRESENTATION_KEYWORDS = (
+    "발표 심사",
+    "발표심사",
+    "발표 평가",
+    "발표평가",
+    "본선 발표",
+    "발표 진행",
+    "발표는",
+    "대면 심사",
+    "대면심사",
+    "비대면",
+    "피칭",
+    "프레젠테이션",
+    "발표 참석",
+    "본선 진출",
+)
+
+
+def _presentation(text: str, summary: str) -> dict:
+    body = f"{summary} {text}"
+    for keyword in PRESENTATION_KEYWORDS:
+        index = body.find(keyword)
+        if index >= 0:
+            return {
+                "flag": "yes",
+                "keyword": keyword,
+                "evidence": body[max(0, index - 40) : index + 120].strip(),
+            }
+    return {"flag": "no", "keyword": None, "evidence": None}
+
+
+def enrich_with_text(parsed: dict, text: str, *, source: str = "attachment") -> dict:
+    """첨부파일 텍스트로 **비어 있는 항목만** 채운다. 이미 찾은 항목은 건드리지 않는다."""
+    body = util.clean(text or "")
+    if not body:
+        return parsed
+    fields = parsed.setdefault("fields", {})
+    missing = parsed.setdefault("missing", [])
+    for key, labels in LABELS.items():
+        if key in fields:
+            continue
+        for label in labels:
+            index = _find_label(body, label)
+            if index is not None:
+                fields[key] = {
+                    "label": label,
+                    "evidence": body[index : index + 240].strip(),
+                    "source": source,
+                }
+                if key in missing:
+                    missing.remove(key)
+                break
+    return parsed
 
 
 def fetch_and_parse(fetcher, url: str, base=None) -> dict:

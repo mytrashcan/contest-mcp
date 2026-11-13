@@ -27,18 +27,68 @@ claude mcp add contest-mcp -s user -- "$(pwd)/.venv/bin/contest-mcp"
 그다음 클라이언트에서 "contest-mcp로 공모전 좀 모아서 브리핑해줘"라고 하면 됩니다.
 처음이면 `refresh` → `digest` 순으로 호출됩니다.
 
-## 툴 9개
+## 툴 12개
 
 | 툴 | 하는 일 |
 |---|---|
 | `search_contests` | 마감·분야·지역·검색어 조회. 같은 공고는 여러 소스에 있어도 1건으로 묶고 출처를 함께 반환. `sort=views_low`면 **조회 적은 순(경쟁 약함)** |
-| `get_contest` | 상세 파싱: 자격·시상·배점·제출물·발표·문의 + 근거 문장 + 발표일 언급 |
+| `get_contest` | 상세 파싱: 자격·시상·배점·제출물·발표·문의 + 근거 문장. `include_attachments=True`면 첨부까지 파싱 |
 | `refresh` | 소스에서 목록 재수집 (아래 5개 소스) |
 | `changes` | 최근 감지된 **공고 변경**(마감 연장·시상 변경·제목 변경) |
 | `digest` | 아침 브리핑: D-N 이내를 경쟁 약한 순으로 + 제한 문구·변경·자격 배지 |
-| `deadlines` | 마감 일정 모으기, 옵션으로 `.ics` 캘린더 생성. 상세 원문에서 찾은 **발표일(추정)** 도 함께 |
-| `mark` / `my_list` | 제출·폐기·관심없음 기록과 조회 |
-| `check_eligibility` | 자격을 내 프로필과 대조해 **학교·지역·나이·신분·팀** 5축으로 pass/fail/unknown 판정 |
+| `deadlines` | 마감 일정 + `.ics` 캘린더, 상세 원문의 **발표일(추정)** 포함 |
+| `mark` | 제출 이력: 상태·제출일·경로·**증빙 발급 여부**·결과 |
+| `my_list` | 내가 표시한 공고. `missing_proof=True`면 증빙 미확인 제출건만 |
+| `add_idea` / `ideas` | 내가 낸 아이디어(작품) 등록·조회 — 재출품 감지용 |
+| `check_reuse` | **재출품 금지 조항** 탐지 + 내 아이디어 유사도 경고 |
+| `check_eligibility` | 자격을 프로필과 대조해 **학교·지역·나이·신분·팀** 5축 pass/fail/unknown 판정 |
+
+## 제출·증빙 이력 (`mark` · `my_list`)
+
+상태만 남기던 기록을 제출 이력으로 확장했습니다. 지원서 증빙이 필요한 상황을 전제로 합니다.
+
+```bash
+python -m contest_mcp.cli mark wevity:112316 submitted \
+  --submitted-at 2026-11-12 --channel email --proof no --result pending --note "메일 발송"
+python -m contest_mcp.cli my-list --missing-proof     # 증빙(상장 등)이 확인 안 된 제출건만
+```
+
+- `proof`: `yes / no / unknown` — 상장·수상확인서 발급 여부
+- `result`: `pending / announced / won / lost`
+- 넘기지 않은 필드는 기존 값을 유지합니다(부분 갱신).
+- 구버전 DB는 열 때 **컬럼을 자동 추가**하고 기존 데이터는 그대로 둡니다.
+
+## 재출품 위험 경고 (`add_idea` · `check_reuse`)
+
+마감이 임박할수록 기존 작품을 재포장하고 싶어지는데, 그게 정확히 실격 축입니다.
+
+```bash
+python -m contest_mcp.cli idea add "아차맵 블랙박스 위험구간 지도" --contest-id wevity:112316
+python -m contest_mcp.cli reuse contestkorea:202610280017 --idea "아차맵 — 블랙박스 위험구간 지도"
+# 판정: warn — 재출품 제한 조항이 있고, 내가 낸 아이디어와 유사한 것이 있습니다.
+#   조항 [중복 신청]: ... 중복 신청 또는 중복 참가 지원은 불가함 ...
+#   유사 아이디어 1.0: 아차맵 블랙박스 위험구간 지도
+```
+
+- 조항 탐지 패턴: 타 공모전·중복 응모/신청/참가·재출품·기출품·동일 작품·표절 등
+- 판정 4단계: `warn`(조항+유사) / `clause_only` / `similar_only` / `clear`
+- **첨부파일에만 있는 조항**도 잡습니다(`get_contest(include_attachments=True)`로 첨부 텍스트를 저장한 경우)
+
+## 첨부 파싱 (`include_attachments`)
+
+배점·제출물·발표 방식은 본문에 없고 첨부에만 있는 경우가 많습니다(실측: 배점 2/12).
+
+- 지원 형식: **hwpx · docx**(zip+xml, 표준 라이브러리만) / **pdf**(`pdftotext`) / **zip 안의 문서** / hwp(`hwp5txt`·LibreOffice 있을 때)
+- 이미 본문에서 찾은 항목은 건드리지 않고 **비어 있는 항목만** 채웁니다(`source: attachment` 표시)
+- 파서가 없으면 조용히 넘어가지 않고 `error`에 이유를 남깁니다
+- 한계: **씽굿 첨부는 `href="javascript:void(0)"` JS 다운로드**라 자동 수집이 불가합니다(링크가 아니라 앵커 텍스트 확장자로도 판별하지만, JS면 건너뜁니다)
+
+## 발표 문구 플래그
+
+`presentation.flag`는 **발표 관련 문구가 원문에 있는지**만 봅니다(참석 필수 판정 아님).
+
+- 인정 표현: `발표 심사`·`발표평가`·`본선 발표`·`발표는`·`대면 심사`·`비대면`·`피칭`·`프레젠테이션`·`본선 진출`
+- `발표` 단독은 네비게이션("수상자 발표")에 걸려 오탐이 나서 제외했습니다(실측으로 잡은 문제)
 
 ## 변경 감지 (`changes`)
 
@@ -148,7 +198,8 @@ sqlite 한 파일(`~/.contest-mcp/db.sqlite`)에 4개 테이블.
 | 테이블 | 내용 |
 |---|---|
 | `contest` | 수집된 공고(소스별 1행) + 상세 파싱 캐시 + 마감일 근거(`apply_end_basis`) |
-| `my_list` | 내 상태(제출/폐기/관심없음)와 메모 |
+| `my_list` | 내 상태 + 제출일·경로·증빙·결과 |
+| `idea` | 내가 낸 아이디어(토큰·낸 공고 목록) — 재출품 감지용 |
 | `change_log` | 필드별 변경 이력(같은 전이 중복 방지) |
 | `source_run` | 소스별 마지막 실행 결과(수집 수·오류) |
 
@@ -163,7 +214,11 @@ python -m contest_mcp.cli digest --days 7                      # 아침 브리�
 python -m contest_mcp.cli search --query AI --dday 30          # 검색
 python -m contest_mcp.cli search --sort views_low --dday 30    # 경쟁 약한 순
 python -m contest_mcp.cli detail wevity:112316                 # 상세 원문 파싱
+python -m contest_mcp.cli detail contestkorea:202610280017 --attachments  # 첨부까지
 python -m contest_mcp.cli check wevity:112316                  # 자격 판정
+python -m contest_mcp.cli reuse wevity:112316 --idea "아차맵"   # 재출품 조항·유사 아이디어
+python -m contest_mcp.cli idea add "아차맵" --contest-id wevity:112316
+python -m contest_mcp.cli my-list --missing-proof              # 증빙 미확인 제출건
 python -m contest_mcp.cli changes --days 7                     # 최근 변경
 python -m contest_mcp.cli deadlines --days 14 --ics ~/Downloads/contest.ics
 python -m contest_mcp.cli mark wevity:112316 submitted --note "11/12 접수"
@@ -194,14 +249,16 @@ python -m contest_mcp.cli my-list --state submitted
 - 이벤터스·기업마당·K-Startup 등 나머지 소스 (위 참조)
 - 자격 판정은 규칙 기반 — 시·군 단위 제한, 트랙별 예외, 서류 요건은 `unknown`
 - 발표일은 원문 문장에서 뽑은 **추정값**(`[발표?]`). 상세를 한 번도 열지 않은 공고는 없음
-- 배점·발표 필참은 커버리지가 낮아 관련 필터를 제공하지 않음
+- **씽굿 첨부는 JS 다운로드**(`javascript:void(0)`)라 자동 수집 불가 → 그 소스는 본문 파싱만
+- pdf·hwp 첨부는 `pdftotext`/`hwp5txt`(또는 LibreOffice)가 설치된 환경에서만 파싱된다. 없으면 `error`로 남는다
+- 배점·발표 필참은 커버리지가 낮아 관련 **필터**는 제공하지 않는다(문구 플래그·근거 문장만 제공)
 - 원격 호스팅/OAuth 없음 — 1인 로컬(stdio) 기준
 
 ## 개발
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest     # 66 tests — 네트워크 없이 파서·DB·ICS·자격·변경·브리핑 검증
+.venv/bin/python -m pytest     # 94 tests — 네트워크 없이 파서·DB·ICS·자격·변경·재출품·첨부 검증
 .venv/bin/python -m ruff check src tests
 ```
 
