@@ -152,7 +152,10 @@ def _extract(ext: str, data: bytes) -> tuple[str, str | None, str | None]:
                 elif inner_error:
                     errors.append(f"{name}: {inner_error}")
         method = ",".join(sorted(set(methods))) or None
-        return "\n".join(texts), method, ("; ".join(errors) or None)
+        error = "; ".join(errors) or None
+        if not texts and not error:
+            error = "zip 안에 지원 형식(hwpx·docx·pdf) 없음"
+        return "\n".join(texts), method, error
     return "", None, f"지원하지 않는 형식: {ext}"
 
 

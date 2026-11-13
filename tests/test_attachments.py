@@ -82,6 +82,20 @@ def test_zip_attachment_parses_inner_hwpx():
     assert "배점 : 창의성 40" in result["text"]
 
 
+def test_zip_without_supported_files_reports_reason():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("readme.txt", "hello")
+
+    class FakeFetcher:
+        def get_bytes(self, url):
+            return buffer.getvalue()
+
+    result = attachments.text_of(FakeFetcher(), {"url": "https://example.com/a.zip", "name": "a.zip", "ext": ".zip"})
+    assert result["text"] == ""
+    assert result["error"] and "지원 형식" in result["error"]
+
+
 def test_extract_links_dedupes_and_resolves_relative():
     links = attachments.extract_links(HTML_WITH_LINKS, "https://example.com/contest/1")
     urls = [link["url"] for link in links]
