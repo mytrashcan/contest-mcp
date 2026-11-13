@@ -12,7 +12,7 @@ import datetime as dt
 import os
 from pathlib import Path
 
-from . import db, detail, eligibility, ics, profile, util
+from . import attachments, db, detail, eligibility, ics, profile, reuse, util
 from . import digest as digest_report
 from .http import DEFAULT_INSECURE_HOSTS, Fetcher
 from .sources import SOURCES
@@ -134,12 +134,14 @@ def build_server():
             conn.close()
 
     @mcp.tool()
-    def get_contest(ident: str, refresh_detail: bool = True) -> dict:
+    def get_contest(ident: str, refresh_detail: bool = True, include_attachments: bool = False) -> dict:
         """공모전 1건의 상세(자격·시상·배점·제출물·발표·문의처)를 원문 근거와 함께 가져온다.
 
         Args:
             ident: `wevity:112073` 같은 id, 상세 URL, 또는 ix·contest_pk 값.
             refresh_detail: True면 상세 페이지를 지금 받아 갱신(하루 1회 캐시).
+            include_attachments: True면 첨부(hwpx·docx·pdf)에서 텍스트를 뽑아 **비어 있는 항목만** 채운다
+                (최대 2건, 시간이 더 걸린다).
         """
         conn = _connect()
         try:
@@ -156,6 +158,25 @@ def build_server():
                     item["detail_checked_at"] = today
                 except Exception as exc:
                     item["detail_error"] = f"{type(exc).__name__}: {exc}"
+            if include_attachments and item.get("detail"):
+                fetcher = Fetcher()
+                results = []
+                texts: list[str] = []
+                for link in (item["detail"].get("attachments") or [])[:2]:
+                    parsed_link = attachments.text_of(fetcher, link)
+                    results.append({key: parsed_link[key] for key in ("name", "ext", "method", "chars", "error")})
+                    if parsed_link["text"]:
+                        texts.append(parsed_link["text"])
+                        detail.enrich_with_text(item["detail"], parsed_link["text"])
+                item["attachment_results"] = results
+                if texts:
+                    item["detail"]["attachment_text"] = "\n".join(texts)[:8000]
+                db.save_detail(
+                    conn,
+                    item["id"],
+                    item["detail"],
+                    apply_end=item["detail"].get("deadline_from_detail"),
+                )
             return {"found": True, **item}
         finally:
             conn.close()
@@ -238,13 +259,29 @@ def build_server():
             conn.close()
 
     @mcp.tool()
-    def mark(ident: str, state: str, note: str = "") -> dict:
-        """공모전에 내 상태를 기록한다 (submitted | dropped | skip).
+    def mark(
+        ident: str,
+        state: str,
+        note: str = "",
+        submitted_at: str | None = None,
+        channel: str | None = None,
+        proof: str | None = None,
+        proof_path: str | None = None,
+        result: str | None = None,
+        result_note: str | None = None,
+    ) -> dict:
+        """공모전에 내 상태와 제출 이력을 기록한다.
 
         Args:
             ident: contest id, URL, 또는 목록에서 받은 값.
             state: submitted(냈음) | dropped(버림) | skip(관심 없음).
-            note: 메모 (제출 시각·경로 등).
+            note: 메모.
+            submitted_at: 제출일 (YYYY-MM-DD).
+            channel: email | form | site | other.
+            proof: 상장·증빙 발급 여부 yes | no | unknown.
+            proof_path: 증빙 파일 경로.
+            result: pending | announced | won | lost.
+            result_note: 결과 메모.
         """
         if state not in {"submitted", "dropped", "skip"}:
             return {"ok": False, "error": "state는 submitted | dropped | skip 중 하나"}
@@ -253,22 +290,94 @@ def build_server():
             item = db.get(conn, ident)
             if item is None:
                 return {"ok": False, "error": f"공고를 찾을 수 없음: {ident}"}
-            db.set_state(conn, item["id"], state, note)
-            return {"ok": True, "id": item["id"], "name": item["name"], "state": state, "note": note}
+            db.set_state(
+                conn,
+                item["id"],
+                state,
+                note,
+                submitted_at=submitted_at,
+                channel=channel,
+                proof=proof,
+                proof_path=proof_path,
+                result=result,
+                result_note=result_note,
+            )
+            saved = next((row for row in db.my_list(conn, state) if row["contest_id"] == item["id"]), {})
+            return {"ok": True, "id": item["id"], "name": item["name"], **saved}
         finally:
             conn.close()
 
     @mcp.tool()
-    def my_list(state: str | None = None) -> dict:
+    def my_list(state: str | None = None, missing_proof: bool = False) -> dict:
         """내가 표시한 공고 목록 (제출/버림/관심 없음).
 
         Args:
             state: submitted | dropped | skip. 생략하면 전체.
+            missing_proof: True면 **제출했는데 증빙(상장 등)이 확인되지 않은 건만**.
         """
         conn = _connect()
         try:
-            rows = db.my_list(conn, state)
+            rows = db.my_list(conn, state, missing_proof=missing_proof)
             return {"count": len(rows), "items": rows}
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def add_idea(label: str, contest_id: str | None = None, note: str = "") -> dict:
+        """내가 낸 아이디어(작품)를 등록한다 — 나중에 재출품 위험을 감지하기 위해.
+
+        Args:
+            label: 아이디어/작품 이름 (예: "아차맵 — 블랙박스 위험구간 지도").
+            contest_id: 이 아이디어를 낸 공고 id(있으면).
+            note: 메모.
+        """
+        conn = _connect()
+        try:
+            return {"ok": True, "idea": db.add_idea(conn, label, contest_id, note)}
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def ideas() -> dict:
+        """등록된 내 아이디어 목록."""
+        conn = _connect()
+        try:
+            rows = db.ideas(conn)
+            return {"count": len(rows), "items": rows}
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def check_reuse(ident: str, idea_label: str | None = None) -> dict:
+        """재출품 제한 조항과 내 아이디어 유사도를 확인한다(실격 예방).
+
+        Args:
+            ident: contest id 또는 URL.
+            idea_label: 지금 내려는 아이디어 이름. 주면 등록된 아이디어와 유사도를 비교한다.
+        """
+        conn = _connect()
+        try:
+            item = db.get(conn, ident)
+            if item is None:
+                return {"found": False, "ident": ident}
+            if not item.get("detail"):
+                try:
+                    parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
+                    item["detail"] = parsed
+                except Exception as exc:
+                    return {"found": True, "id": item["id"], "error": f"상세 파싱 실패: {exc}"}
+            detail_data = item.get("detail") or {}
+            fields = detail_data.get("fields") or {}
+            text = " ".join(
+                filter(
+                    None,
+                    [detail_data.get("summary") or "", detail_data.get("attachment_text") or ""]
+                    + [info.get("evidence") or "" for info in fields.values()],
+                )
+            )
+            report = reuse.check(conn, text, idea_label=idea_label)
+            return {"found": True, "id": item["id"], "name": item["name"], "url": item["url"], **report}
         finally:
             conn.close()
 

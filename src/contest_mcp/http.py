@@ -55,7 +55,7 @@ class Fetcher:
             return self._robots[host]
         url = f"https://{host}/robots.txt"
         try:
-            body = self._request(url, headers={})
+            body = self._raw(url, headers={}).decode("utf-8", "replace")
         except Exception:
             # robots.txt를 못 받으면 막지 않는다(없는 경우와 구분 불가). 판단 불가는 allow.
             self._robots[host] = None
@@ -105,27 +105,33 @@ class Fetcher:
             return ssl._create_unverified_context()  # noqa: SLF001 - 의도적 예외
         return None
 
-    def _request(self, url: str, *, headers: dict[str, str], data: bytes | None = None) -> str:
+    def _raw(self, url: str, *, headers: dict[str, str], data: bytes | None = None) -> bytes:
         parsed = urllib.parse.urlsplit(url)
         self._wait(parsed.netloc)
         request = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **headers})
         try:
             context = self._context(parsed.netloc)
             with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
-                raw = response.read()
+                return response.read()
         except urllib.error.HTTPError as exc:
             raise FetchError(f"HTTP {exc.code} {url}") from exc
         except urllib.error.URLError as exc:
             raise FetchError(f"{exc.reason} {url}") from exc
         except TimeoutError as exc:
             raise FetchError(f"timeout {url}") from exc
-        return raw.decode("utf-8", "replace")
 
     def get(self, url: str, headers: dict[str, str] | None = None) -> str:
         ok, reason = self.robots_allowed(url)
         if not ok:
             raise RobotsDenied(reason)
-        return self._request(url, headers=headers or {})
+        return self._raw(url, headers=headers or {}).decode("utf-8", "replace")
+
+    def get_bytes(self, url: str, headers: dict[str, str] | None = None) -> bytes:
+        """첨부파일(hwp·pdf 등)처럼 텍스트 디코드 없이 바이트로 받아야 할 때."""
+        ok, reason = self.robots_allowed(url)
+        if not ok:
+            raise RobotsDenied(reason)
+        return self._raw(url, headers=headers or {})
 
     def post_form(self, url: str, form: dict[str, object], headers: dict[str, str] | None = None) -> str:
         ok, reason = self.robots_allowed(url)
@@ -133,7 +139,7 @@ class Fetcher:
             raise RobotsDenied(reason)
         body = urllib.parse.urlencode(form).encode()
         merged = {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})}
-        return self._request(url, headers=merged, data=body)
+        return self._raw(url, headers=merged, data=body).decode("utf-8", "replace")
 
     def post_json(self, url: str, payload: dict[str, object], headers: dict[str, str] | None = None) -> str:
         ok, reason = self.robots_allowed(url)
@@ -141,4 +147,4 @@ class Fetcher:
             raise RobotsDenied(reason)
         body = json.dumps(payload, ensure_ascii=False).encode()
         merged = {"Content-Type": "application/json; charset=UTF-8", **(headers or {})}
-        return self._request(url, headers=merged, data=body)
+        return self._raw(url, headers=merged, data=body).decode("utf-8", "replace")

@@ -19,6 +19,9 @@ EXPECTED_TOOLS = {
     "check_eligibility",
     "changes",
     "digest",
+    "add_idea",
+    "ideas",
+    "check_reuse",
 }
 
 

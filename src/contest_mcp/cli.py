@@ -7,7 +7,7 @@ import datetime as dt
 import json
 import sys
 
-from . import db, detail, eligibility, ics, profile, util
+from . import attachments, db, detail, eligibility, ics, profile, reuse, util
 from . import digest as digest_report
 from .http import Fetcher
 from .server import db_path, refresh_sources
@@ -79,6 +79,22 @@ def cmd_detail(args: argparse.Namespace) -> int:
             print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
             return 1
         parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+        if args.attachments and parsed.get("attachments"):
+            fetcher = Fetcher()
+            results = []
+            texts: list[str] = []
+            for link in parsed["attachments"][:2]:
+                got = attachments.text_of(fetcher, link)
+                results.append(got)
+                if got["text"]:
+                    texts.append(got["text"])
+                    detail.enrich_with_text(parsed, got["text"])
+            parsed["attachment_results"] = [
+                {key: got[key] for key in ("name", "ext", "method", "chars", "error")} for got in results
+            ]
+            if texts:
+                # 재출품 조항·유의사항은 첨부에만 있는 경우가 많아 앞부분을 보관한다(8천 자 상한).
+                parsed["attachment_text"] = "\n".join(texts)[:8000]
         db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
     finally:
         conn.close()
@@ -228,25 +244,95 @@ def cmd_mark(args: argparse.Namespace) -> int:
         if item is None:
             print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
             return 1
-        db.set_state(conn, item["id"], args.state, args.note or "")
+        db.set_state(
+            conn,
+            item["id"],
+            args.state,
+            args.note or "",
+            submitted_at=args.submitted_at,
+            channel=args.channel,
+            proof=args.proof,
+            proof_path=args.proof_path,
+            result=args.result,
+            result_note=args.result_note,
+        )
+        row = next((r for r in db.my_list(conn, args.state) if r["contest_id"] == item["id"]), {})
     finally:
         conn.close()
     print(f"{item['name']} → {args.state}")
+    if args.json:
+        _print_json(row)
     return 0
 
 
 def cmd_my_list(args: argparse.Namespace) -> int:
     conn = _open()
     try:
-        rows = db.my_list(conn, args.state)
+        rows = db.my_list(conn, args.state, missing_proof=args.missing_proof)
     finally:
         conn.close()
     if args.json:
         _print_json(rows)
         return 0
+    labels = {"submitted": "제출", "dropped": "폐기", "skip": "관심없음"}
     for row in rows:
-        print(f"[{row['state']}] {row['name'] or row['contest_id']} ({row['updated_at']}) {row['note'] or ''}")
+        proof = {"yes": "증빙O", "no": "증빙X"}.get(row["proof"] or "", "증빙?")
+        result = row["result"] or "-"
+        print(f"[{labels.get(row['state'], row['state'])}] {row['name'] or row['contest_id']}")
+        print(f"    제출 {row['submitted_at'] or '-'} · 경로 {row['channel'] or '-'} · {proof} · 결과 {result}"
+              f"{' · ' + row['note'] if row['note'] else ''}")
     print(f"\n총 {len(rows)}건")
+    return 0
+
+
+def cmd_idea(args: argparse.Namespace) -> int:
+    conn = _open()
+    try:
+        if args.action == "add":
+            idea = db.add_idea(conn, args.label, args.contest_id, args.note or "")
+            print(f"등록: {idea['label']} (id {idea['id']}, 공고 {idea['contest_ids']})")
+        else:
+            rows = db.ideas(conn)
+            for row in rows:
+                print(f"[{row['id']}] {row['label']} — 공고 {row['contest_ids']} {row['note'] or ''}")
+            print(f"\n총 {len(rows)}건")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_reuse(args: argparse.Namespace) -> int:
+    conn = _open()
+    try:
+        item = db.get(conn, args.ident)
+        if item is None:
+            print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
+            return 1
+        if not item.get("detail"):
+            parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+            db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
+            item["detail"] = parsed
+        detail_data = item.get("detail") or {}
+        fields = detail_data.get("fields") or {}
+        text = " ".join(
+            filter(
+                None,
+                [detail_data.get("summary") or "", detail_data.get("attachment_text") or ""]
+                + [info.get("evidence") or "" for info in fields.values()],
+            )
+        )
+        report = reuse.check(conn, text, idea_label=args.idea)
+    finally:
+        conn.close()
+    if args.json:
+        _print_json(report)
+        return 0
+    print(f"{item['name']}")
+    print(f"판정: {report['verdict']} — {report['reason']}")
+    for clause in report["clauses"]:
+        print(f"  조항 [{clause['pattern']}]: {clause['evidence'][:110]}")
+    for idea in report["similar_ideas"]:
+        print(f"  유사 아이디어 {idea['score']}: {idea['label']} (공고 {idea['contest_ids']})")
     return 0
 
 
@@ -272,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     detail_cmd = sub.add_parser("detail", help="상세 조회 (원문 파싱)")
     detail_cmd.add_argument("ident")
+    detail_cmd.add_argument("--attachments", action="store_true", help="첨부(hwpx·pdf)에서 빈 항목 채우기")
     detail_cmd.set_defaults(func=cmd_detail)
 
     deadlines = sub.add_parser("deadlines", help="마감 일정 / ICS 생성")
@@ -294,15 +381,34 @@ def build_parser() -> argparse.ArgumentParser:
     chg.add_argument("--days", type=int, default=7)
     chg.set_defaults(func=cmd_changes)
 
-    mark = sub.add_parser("mark", help="내 상태 기록")
+    mark = sub.add_parser("mark", help="내 상태·제출 이력 기록")
     mark.add_argument("ident")
     mark.add_argument("state", choices=["submitted", "dropped", "skip"])
     mark.add_argument("--note")
+    mark.add_argument("--submitted-at", dest="submitted_at", help="제출일 YYYY-MM-DD")
+    mark.add_argument("--channel", choices=["email", "form", "site", "other"])
+    mark.add_argument("--proof", choices=["yes", "no", "unknown"], help="상장·증빙 발급 여부")
+    mark.add_argument("--proof-path", dest="proof_path")
+    mark.add_argument("--result", choices=["pending", "announced", "won", "lost"])
+    mark.add_argument("--result-note", dest="result_note")
     mark.set_defaults(func=cmd_mark)
 
     mine = sub.add_parser("my-list", help="내가 표시한 공고")
     mine.add_argument("--state", choices=["submitted", "dropped", "skip"])
+    mine.add_argument("--missing-proof", action="store_true", help="증빙 미확인 제출건만")
     mine.set_defaults(func=cmd_my_list)
+
+    idea = sub.add_parser("idea", help="내 아이디어 등록/목록 (재출품 감지용)")
+    idea.add_argument("action", choices=["add", "list"])
+    idea.add_argument("label", nargs="?", help="아이디어 이름 (add일 때)")
+    idea.add_argument("--contest-id", dest="contest_id")
+    idea.add_argument("--note")
+    idea.set_defaults(func=cmd_idea)
+
+    reusecmd = sub.add_parser("reuse", help="재출품 제한 조항·내 아이디어 유사도 확인")
+    reusecmd.add_argument("ident")
+    reusecmd.add_argument("--idea", help="지금 내려는 아이디어 이름")
+    reusecmd.set_defaults(func=cmd_reuse)
 
     return parser
 

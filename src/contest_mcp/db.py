@@ -38,7 +38,21 @@ CREATE TABLE IF NOT EXISTS my_list (
     contest_id TEXT PRIMARY KEY,
     state      TEXT NOT NULL,           -- submitted | dropped | skip
     note       TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    submitted_at TEXT,                  -- 제출일 (YYYY-MM-DD)
+    channel    TEXT,                    -- email | form | site | other
+    proof      TEXT,                    -- 상장/증빙 발급: yes | no | unknown
+    proof_path TEXT,                    -- 증빙 파일 경로
+    result     TEXT,                    -- pending | announced | won | lost
+    result_note TEXT
+);
+CREATE TABLE IF NOT EXISTS idea (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    label      TEXT NOT NULL,
+    tokens     TEXT NOT NULL,           -- 병합·유사도용 토큰(공백 구분)
+    contest_ids TEXT,                   -- 이 아이디어를 낸 공고 id 목록(JSON)
+    note       TEXT,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS source_run (
     source    TEXT PRIMARY KEY,
@@ -78,13 +92,33 @@ def _mergeable(left: set[str], right: set[str]) -> bool:
     return len(small) >= MIN_MERGE_TOKENS and small <= big
 
 
+MY_LIST_COLUMNS = {
+    "submitted_at": "TEXT",
+    "channel": "TEXT",
+    "proof": "TEXT",
+    "proof_path": "TEXT",
+    "result": "TEXT",
+    "result_note": "TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """이전 버전 DB에 없는 컬럼을 붙인다(파괴적 변경 없음)."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(my_list)")}
+    for column, ddl in MY_LIST_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE my_list ADD COLUMN {column} {ddl}")
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
-    """DB 연결 (없으면 스키마 생성)."""
+    """DB 연결 (없으면 스키마 생성, 구버전이면 컬럼 추가)."""
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.commit()
     return conn
 
 
@@ -375,31 +409,130 @@ def set_state(
     state: str,
     note: str = "",
     base: dt.date | None = None,
+    *,
+    submitted_at: str | None = None,
+    channel: str | None = None,
+    proof: str | None = None,
+    proof_path: str | None = None,
+    result: str | None = None,
+    result_note: str | None = None,
 ) -> None:
+    """내 상태 기록. 넘기지 않은 필드는 기존 값을 유지한다."""
+    ref = (base or util.today()).isoformat()
     conn.execute(
         "INSERT INTO my_list (contest_id, state, note, updated_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(contest_id) DO UPDATE SET "
-        "state = excluded.state, note = excluded.note, updated_at = excluded.updated_at",
-        (contest_id, state, note, (base or util.today()).isoformat()),
+        "ON CONFLICT(contest_id) DO NOTHING",
+        (contest_id, state, note, ref),
+    )
+    updates: dict[str, object] = {"state": state, "note": note, "updated_at": ref}
+    for column, value in (
+        ("submitted_at", submitted_at),
+        ("channel", channel),
+        ("proof", proof),
+        ("proof_path", proof_path),
+        ("result", result),
+        ("result_note", result_note),
+    ):
+        if value is not None:
+            updates[column] = value
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE my_list SET {assignments} WHERE contest_id = ?",
+        (*updates.values(), contest_id),
     )
     conn.commit()
 
 
-def my_list(conn: sqlite3.Connection, state: str | None = None) -> list[dict]:
+def my_list(
+    conn: sqlite3.Connection,
+    state: str | None = None,
+    *,
+    missing_proof: bool = False,
+) -> list[dict]:
+    """내가 표시한 공고. ``missing_proof`` 면 제출했는데 증빙(상장 등)이 확인되지 않은 건만."""
     sql = (
-        "SELECT m.contest_id, m.state, m.note, m.updated_at, c.name, c.host, c.url, c.apply_end "
+        "SELECT m.contest_id, m.state, m.note, m.updated_at, m.submitted_at, m.channel, m.proof, "
+        "       m.proof_path, m.result, m.result_note, "
+        "       c.name, c.host, c.url, c.apply_end "
         "FROM my_list m LEFT JOIN contest c ON c.id = m.contest_id"
     )
-    params: tuple[object, ...] = ()
+    clauses: list[str] = []
+    params: list[object] = []
     if state:
-        sql += " WHERE m.state = ?"
-        params = (state,)
-    sql += " ORDER BY m.updated_at DESC"
+        clauses.append("m.state = ?")
+        params.append(state)
+    if missing_proof:
+        clauses.append("m.state = 'submitted' AND (m.proof IS NULL OR m.proof != 'yes')")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY COALESCE(m.submitted_at, m.updated_at) DESC"
     return [dict(row) for row in conn.execute(sql, params)]
 
 
 def submitted_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT contest_id FROM my_list WHERE state = 'submitted'")}
+
+
+def add_idea(
+    conn: sqlite3.Connection,
+    label: str,
+    contest_id: str | None = None,
+    note: str = "",
+    base: dt.date | None = None,
+) -> dict:
+    """아이디어(작품) 등록. 같은 라벨이면 공고 id만 추가한다(재사용 감지용)."""
+    ref = (base or util.today()).isoformat()
+    tokens = " ".join(sorted(util.name_tokens(label)))
+    row = conn.execute("SELECT id, contest_ids FROM idea WHERE lower(label) = lower(?)", (label,)).fetchone()
+    if row is None:
+        cursor = conn.execute(
+            "INSERT INTO idea (label, tokens, contest_ids, note, created_at) VALUES (?, ?, ?, ?, ?)",
+            (label, tokens, json.dumps([contest_id] if contest_id else [], ensure_ascii=False), note, ref),
+        )
+        idea_id = cursor.lastrowid
+    else:
+        idea_id = row["id"]
+        ids = json.loads(row["contest_ids"] or "[]")
+        if contest_id and contest_id not in ids:
+            ids.append(contest_id)
+        conn.execute(
+            "UPDATE idea SET tokens = ?, contest_ids = ?, note = COALESCE(NULLIF(?, ''), note) WHERE id = ?",
+            (tokens, json.dumps(ids, ensure_ascii=False), note, idea_id),
+        )
+    conn.commit()
+    saved = conn.execute("SELECT * FROM idea WHERE id = ?", (idea_id,)).fetchone()
+    return {**dict(saved), "contest_ids": json.loads(saved["contest_ids"] or "[]")}
+
+
+def ideas(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM idea ORDER BY created_at DESC").fetchall()
+    return [{**dict(row), "contest_ids": json.loads(row["contest_ids"] or "[]")} for row in rows]
+
+
+def similar_ideas(conn: sqlite3.Connection, text: str, *, threshold: float = 0.5) -> list[dict]:
+    """내가 낸 아이디어와 입력 텍스트의 토큰 유사도(Jaccard)."""
+    target = util.name_tokens(text)
+    if not target:
+        return []
+    matches: list[dict] = []
+    for idea in ideas(conn):
+        stored = set((idea["tokens"] or "").split())
+        if not stored:
+            continue
+        union = target | stored
+        score = len(target & stored) / len(union) if union else 0.0
+        if score >= threshold:
+            matches.append(
+                {
+                    "id": idea["id"],
+                    "label": idea["label"],
+                    "score": round(score, 2),
+                    "contest_ids": idea["contest_ids"],
+                    "note": idea["note"],
+                    "created_at": idea["created_at"],
+                }
+            )
+    return sorted(matches, key=lambda item: -item["score"])
 
 
 def record_run(
