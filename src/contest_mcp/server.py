@@ -159,24 +159,30 @@ def build_server():
                 except Exception as exc:
                     item["detail_error"] = f"{type(exc).__name__}: {exc}"
             if include_attachments and item.get("detail"):
-                fetcher = Fetcher()
-                results = []
-                texts: list[str] = []
-                for link in (item["detail"].get("attachments") or [])[:2]:
-                    parsed_link = attachments.text_of(fetcher, link)
-                    results.append({key: parsed_link[key] for key in ("name", "ext", "method", "chars", "error")})
-                    if parsed_link["text"]:
-                        texts.append(parsed_link["text"])
-                        detail.enrich_with_text(item["detail"], parsed_link["text"])
-                item["attachment_results"] = results
-                if texts:
-                    item["detail"]["attachment_text"] = "\n".join(texts)[:8000]
-                db.save_detail(
-                    conn,
-                    item["id"],
-                    item["detail"],
-                    apply_end=item["detail"].get("deadline_from_detail"),
-                )
+                already = item["detail"].get("attachment_text") and item.get("detail_checked_at") == today
+                if already:
+                    item["attachment_cached"] = True
+                else:
+                    fetcher = Fetcher()
+                    results = []
+                    texts: list[str] = []
+                    for link in (item["detail"].get("attachments") or [])[:2]:
+                        parsed_link = attachments.text_of(fetcher, link)
+                        results.append(
+                            {key: parsed_link[key] for key in ("name", "ext", "method", "chars", "error")}
+                        )
+                        if parsed_link["text"]:
+                            texts.append(parsed_link["text"])
+                            detail.enrich_with_text(item["detail"], parsed_link["text"])
+                    item["attachment_results"] = results
+                    if texts:
+                        item["detail"]["attachment_text"] = "\n".join(texts)[:8000]
+                    db.save_detail(
+                        conn,
+                        item["id"],
+                        item["detail"],
+                        apply_end=item["detail"].get("deadline_from_detail"),
+                    )
             return {"found": True, **item}
         finally:
             conn.close()
@@ -304,6 +310,8 @@ def build_server():
             )
             saved = next((row for row in db.my_list(conn, state) if row["contest_id"] == item["id"]), {})
             return {"ok": True, "id": item["id"], "name": item["name"], **saved}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         finally:
             conn.close()
 

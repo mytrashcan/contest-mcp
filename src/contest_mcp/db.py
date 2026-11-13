@@ -101,6 +101,11 @@ MY_LIST_COLUMNS = {
     "result_note": "TEXT",
 }
 
+# 값 검증: 오타가 DB에 들어가면 '증빙 미확인' 필터가 조용히 틀린다.
+ALLOWED_CHANNELS = frozenset({"email", "form", "site", "other"})
+ALLOWED_PROOF = frozenset({"yes", "no", "unknown"})
+ALLOWED_RESULTS = frozenset({"pending", "announced", "won", "lost"})
+
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """이전 버전 DB에 없는 컬럼을 붙인다(파괴적 변경 없음)."""
@@ -418,6 +423,13 @@ def set_state(
     result_note: str | None = None,
 ) -> None:
     """내 상태 기록. 넘기지 않은 필드는 기존 값을 유지한다."""
+    for value, allowed, label in (
+        (channel, ALLOWED_CHANNELS, "channel"),
+        (proof, ALLOWED_PROOF, "proof"),
+        (result, ALLOWED_RESULTS, "result"),
+    ):
+        if value is not None and value not in allowed:
+            raise ValueError(f"{label} 값이 올바르지 않습니다: {value} (허용: {', '.join(sorted(allowed))})")
     ref = (base or util.today()).isoformat()
     conn.execute(
         "INSERT INTO my_list (contest_id, state, note, updated_at) VALUES (?, ?, ?, ?) "
@@ -509,8 +521,26 @@ def ideas(conn: sqlite3.Connection) -> list[dict]:
     return [{**dict(row), "contest_ids": json.loads(row["contest_ids"] or "[]")} for row in rows]
 
 
+def _similarity_score(target: set[str], stored: set[str]) -> float:
+    """Jaccard + (토큰 2개 이상일 때) 포함관계 점수 중 큰 값.
+
+    내 아이디어를 짧게 등록해두면 긴 설명과의 Jaccard가 낮아 놓치는 문제가 있었다(리뷰에서 실측).
+    두 토큰 이상 겹치면 포함관계를 인정해 재현율을 올리고, 토큰 1개짜리는 Jaccard만 쓴다(오탐 방지).
+    """
+    if not target or not stored:
+        return 0.0
+    intersection = len(target & stored)
+    if not intersection:
+        return 0.0
+    jaccard = intersection / len(target | stored)
+    smallest = min(len(target), len(stored))
+    if smallest >= 2 and intersection >= 2:
+        return max(jaccard, intersection / smallest)
+    return jaccard
+
+
 def similar_ideas(conn: sqlite3.Connection, text: str, *, threshold: float = 0.5) -> list[dict]:
-    """내가 낸 아이디어와 입력 텍스트의 토큰 유사도(Jaccard)."""
+    """내가 낸 아이디어와 입력 텍스트의 유사도. 짧은 이름도 잡히도록 포함관계를 함께 본다."""
     target = util.name_tokens(text)
     if not target:
         return []
@@ -519,8 +549,7 @@ def similar_ideas(conn: sqlite3.Connection, text: str, *, threshold: float = 0.5
         stored = set((idea["tokens"] or "").split())
         if not stored:
             continue
-        union = target | stored
-        score = len(target & stored) / len(union) if union else 0.0
+        score = _similarity_score(target, stored)
         if score >= threshold:
             matches.append(
                 {

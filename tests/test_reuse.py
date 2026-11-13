@@ -93,3 +93,18 @@ def test_dissimilar_idea_is_not_matched(tmp_path):
     conn = db.connect(tmp_path / "t.sqlite")
     db.add_idea(conn, "부산 해양문학 청소년 글쓰기", base=BASE)
     assert db.similar_ideas(conn, "아차맵 블랙박스 위험구간 지도") == []
+
+
+def test_short_idea_label_matches_longer_description(tmp_path):
+    """짧게 등록한 아이디어도 두 토큰 이상 겹치면 잡아야 한다(리뷰에서 잡은 누락)."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.add_idea(conn, "아차맵 위험구간", base=BASE)
+    matches = db.similar_ideas(conn, "아차맵 블랙박스 위험구간 지도 서비스")
+    assert matches and matches[0]["score"] >= 0.5
+
+
+def test_single_token_idea_stays_conservative(tmp_path):
+    """토큰 1개짜리 이름은 Jaccard만 쓴다 — 한 단어 겹침으로 경고하지 않는다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.add_idea(conn, "아차맵", base=BASE)
+    assert db.similar_ideas(conn, "아차맵 블랙박스 위험구간 지도 서비스") == []

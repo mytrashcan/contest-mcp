@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 
+import pytest
+
 from contest_mcp import db
 
 BASE = dt.date(2026, 11, 13)
@@ -67,6 +69,18 @@ def test_missing_proof_filters_only_unverified_submissions(tmp_path):
     db.set_state(conn, "wevity:4", "dropped", base=BASE)
     names = {row["name"] for row in db.my_list(conn, missing_proof=True)}
     assert names == {"증빙 없음", "증빙 미확인"}
+
+
+def test_invalid_enum_values_are_rejected(tmp_path):
+    """오타가 DB에 들어가면 '증빙 미확인' 필터가 조용히 틀어진다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(conn, [_rec("1")], BASE)
+    with pytest.raises(ValueError):
+        db.set_state(conn, "wevity:1", "submitted", base=BASE, proof="YES")
+    with pytest.raises(ValueError):
+        db.set_state(conn, "wevity:1", "submitted", base=BASE, channel="mail")
+    with pytest.raises(ValueError):
+        db.set_state(conn, "wevity:1", "submitted", base=BASE, result="win")
 
 
 def test_old_database_gets_new_columns(tmp_path):
