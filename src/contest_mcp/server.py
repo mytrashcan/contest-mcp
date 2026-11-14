@@ -8,6 +8,7 @@ DB 경로: ``CONTEST_MCP_DB`` 환경변수 또는 ``~/.contest-mcp/db.sqlite``.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 from pathlib import Path
@@ -160,16 +161,22 @@ def build_server():
                 return {"found": False, "ident": ident, "hint": "먼저 refresh로 목록을 수집하세요."}
             cached = item.get("detail")
             today = util.today().isoformat()
+            refetched = False
             if refresh_detail and (cached is None or item.get("detail_checked_at") != today):
                 try:
                     parsed = detail.fetch_and_parse(_fetcher(), item["url"])
+                    if not include_attachments:
+                        # 첨부를 다시 받지 않는 호출이면, 전에 첨부에서 얻은 내용을 이어 붙인다.
+                        detail.carry_attachment_text(parsed, cached)
                     db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
                     item["detail"] = parsed
                     item["detail_checked_at"] = today
+                    refetched = True
                 except Exception as exc:
                     item["detail_error"] = f"{type(exc).__name__}: {exc}"
             if include_attachments and item.get("detail"):
-                already = item["detail"].get("attachment_text") and item.get("detail_checked_at") == today
+                has_text = bool(item["detail"].get("attachment_text"))
+                already = has_text and not refetched and item.get("detail_checked_at") == today
                 if already:
                     item["attachment_cached"] = True
                 else:
@@ -187,6 +194,9 @@ def build_server():
                     item["attachment_results"] = results
                     if texts:
                         item["detail"]["attachment_text"] = "\n".join(texts)[:8000]
+                    else:
+                        # 이번에 첨부를 못 받았으면 전에 받아 둔 내용이라도 유지한다.
+                        detail.carry_attachment_text(item["detail"], cached)
                     db.save_detail(
                         conn,
                         item["id"],
@@ -198,14 +208,17 @@ def build_server():
             conn.close()
 
     @mcp.tool()
-    def refresh(sources: list[str] | None = None, max_pages: int = 5) -> dict:
+    async def refresh(sources: list[str] | None = None, max_pages: int = 5) -> dict:
         """소스에서 목록을 다시 수집해 DB를 갱신한다.
+
+        소스 5개를 예절 간격(호스트별 1초)을 두고 받느라 30초 이상 걸릴 수 있다.
+        수집은 별도 스레드에서 돌아, 그동안 서버가 다른 요청에 응답하지 못하는 일은 없다.
 
         Args:
             sources: 수집할 소스 이름 목록 (wevity, thinkgood, allcon, linkareer, contestkorea). 생략하면 전체.
             max_pages: 소스별 최대 페이지 수.
         """
-        return refresh_sources(sources, max_pages=max_pages)
+        return await asyncio.to_thread(refresh_sources, sources, max_pages=max_pages)
 
     @mcp.tool()
     def deadlines(

@@ -149,3 +149,21 @@ def test_individual_or_team_is_not_a_team_requirement():
     assert _axis(eligibility.check("개인 또는 팀(2~4인) 참가", profile), "team")["verdict"] == "pass"
     assert _axis(eligibility.check("팀(2~4인) 또는 개인 참가", profile), "team")["verdict"] == "pass"
     assert _axis(eligibility.check("2~4인 팀 구성 필수", profile), "team")["verdict"] == "fail"
+
+
+def test_status_considers_every_listed_target():
+    """첫 단어만 보지 않는다 — 나열된 대상 어디에든 내 신분이 있으면 pass."""
+    text = "참가 대상: 대학생, 대학원생, 일반인"
+    for status in ("학부생", "대학원생", "일반인"):
+        assert _axis(eligibility.check(text, {**PROFILE, "status": status}), "status")["verdict"] == "pass"
+
+
+def test_excluded_status_is_not_passed():
+    text = "참가 대상: 대학생 및 일반인 (대학원생 제외)"
+    assert _axis(eligibility.check(text, {**PROFILE, "status": "대학원생"}), "status")["verdict"] == "unknown"
+    assert _axis(eligibility.check(text, PROFILE), "status")["verdict"] == "pass"
+
+
+def test_business_only_target_fails_but_mixed_target_does_not():
+    assert _axis(eligibility.check("참가 대상: 소상공인 및 기업", PROFILE), "status")["verdict"] == "fail"
+    assert _axis(eligibility.check("참가 대상: 기업 또는 일반인", PROFILE), "status")["verdict"] == "pass"

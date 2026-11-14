@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import html
 import re
 from zoneinfo import ZoneInfo
 
@@ -25,17 +26,6 @@ _SHORT = re.compile(r"(?<!\d)(\d{2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})(?
 _MONTH_DAY = re.compile(r"(?<![\d.])(\d{1,2})\s*[.\-/]\s*(\d{1,2})(?![\d.])")
 _DDAY = re.compile(r"D\s*[-‐]\s*(\d{1,3})", re.I)
 _DDAY_TODAY = re.compile(r"D\s*[-‐]\s*(?:DAY|0)\b", re.I)
-
-ENTITIES = {
-    "&nbsp;": " ",
-    "&amp;": "&",
-    "&lt;": "<",
-    "&gt;": ">",
-    "&quot;": '"',
-    "&#39;": "'",
-    "&middot;": "·",
-}
-
 
 class EmptyListing(RuntimeError):
     """첫 페이지에서 한 건도 읽지 못했다 — 사이트 구조가 바뀌었을 가능성이 크다."""
@@ -59,9 +49,8 @@ def clean(text: object) -> str:
     """HTML 태그·엔티티·연속 공백을 정리한 평문."""
     if text is None:
         return ""
-    out = str(text)
-    for entity, char in ENTITIES.items():
-        out = out.replace(entity, char)
+    # 엔티티는 전부 푼다(&#8226; · &ldquo; · &#x2F; 등). 몇 개만 풀면 나머지가 제목 병합·조항 탐지에 섞인다.
+    out = html.unescape(str(text))
     out = _TAG.sub(" ", out)
     out = out.replace("\ufeff", "").replace("\u200b", "")
     return _WS.sub(" ", out).strip()

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import ssl
@@ -27,6 +28,23 @@ ROBOTS_AGENT = "contest-mcp"  # robots.txt에서 우리를 가리키는 그룹 �
 DEFAULT_INSECURE_HOSTS = frozenset({"www.all-con.co.kr"})
 DEFAULT_MAX_BYTES = 25 * 1024 * 1024
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+ROBOTS_TTL = 6 * 60 * 60  # 서버가 오래 떠 있어도 robots.txt 변경을 반영하도록 6시간마다 다시 받는다
+INTERNAL_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def is_internal_host(host: str) -> bool:
+    """내 PC·사설망을 가리키는 호스트인지. 공고 페이지의 링크가 내부 주소를 찌르게 두지 않는다.
+
+    이름과 IP 표기만 본다(DNS 조회는 하지 않으므로, 공개 도메인이 사설 IP로 풀리는 경우는 막지 못한다).
+    """
+    name = host.strip("[]").lower().rstrip(".")
+    if not name or name == "localhost" or name.endswith(INTERNAL_SUFFIXES):
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return not address.is_global
 
 Rule = tuple[bool, str]  # (allow 여부, 경로 패턴)
 
@@ -113,8 +131,10 @@ class Fetcher:
         timeout: float = 20.0,
         insecure_hosts: frozenset[str] = DEFAULT_INSECURE_HOSTS,
         max_bytes: int = DEFAULT_MAX_BYTES,
+        robots_ttl: float = ROBOTS_TTL,
         sleep=time.sleep,
     ) -> None:
+        self.robots_ttl = robots_ttl
         self.min_interval = min_interval
         self.timeout = timeout
         self.insecure_hosts = insecure_hosts
@@ -123,6 +143,7 @@ class Fetcher:
         self.warnings: list[str] = []
         self._last_hit: dict[str, float] = {}
         self._robots: dict[str, list[Rule] | None] = {}
+        self._robots_at: dict[str, float] = {}
 
     def _warn(self, note: str) -> None:
         if note not in self.warnings:
@@ -130,8 +151,10 @@ class Fetcher:
 
     # ---------------------------------------------------------------- robots
     def _robots_rules(self, scheme: str, host: str) -> list[Rule] | None:
-        if host in self._robots:
-            return self._robots[host]
+        fetched_at = self._robots_at.get(host)
+        if fetched_at is not None and time.monotonic() - fetched_at < self.robots_ttl:
+            return self._robots.get(host)
+        self._robots_at[host] = time.monotonic()
         url = f"{scheme}://{host}/robots.txt"
         try:
             body = self._raw(url, headers={}).decode("utf-8", "replace")
@@ -163,6 +186,12 @@ class Fetcher:
     def _check_scheme(parsed: urllib.parse.SplitResult, url: str) -> None:
         if parsed.scheme.lower() not in ALLOWED_SCHEMES or not parsed.netloc:
             raise FetchError(f"허용하지 않는 주소(http/https만 가능): {url}")
+        try:
+            host = parsed.hostname or ""
+        except ValueError:
+            host = ""
+        if is_internal_host(host):
+            raise FetchError(f"내부 주소는 받지 않습니다: {url}")
 
     def _wait(self, host: str) -> None:
         last = self._last_hit.get(host)

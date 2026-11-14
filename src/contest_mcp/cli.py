@@ -95,6 +95,8 @@ def cmd_detail(args: argparse.Namespace) -> int:
             if texts:
                 # 재출품 조항·유의사항은 첨부에만 있는 경우가 많아 앞부분을 보관한다(8천 자 상한).
                 parsed["attachment_text"] = "\n".join(texts)[:8000]
+        # 이번에 첨부를 받지 않았으면(또는 못 받았으면) 전에 받아 둔 첨부 내용을 유지한다.
+        detail.carry_attachment_text(parsed, item.get("detail"))
         db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
     finally:
         conn.close()

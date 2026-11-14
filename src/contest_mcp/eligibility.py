@@ -47,6 +47,10 @@ _AGE_COND = re.compile(r"만?\s*(\d{1,2})\s*세\s*(이상|이하|미만|초과)"
 _AGE_RANGE = re.compile(r"만\s*(\d{1,2})\s*세?\s*[~\-]\s*(?:만\s*)?(\d{1,2})\s*세")
 _AGE_OK = {"이상": operator.ge, "이하": operator.le, "미만": operator.lt, "초과": operator.gt}
 _STUDENT = re.compile(r"(대학생|대학원생|학부생|고등학생|청소년|일반인|직장인|기업|소상공인)")
+_UNDERGRAD = frozenset({"대학생", "학부생"})
+_BUSINESS = frozenset({"기업", "소상공인"})
+# 신분 바로 뒤에 붙어 그 신분을 대상에서 빼는 표현("대학원생 제외", "일반인은 참가 불가").
+_EXCLUDED_AFTER = re.compile(r"\s*(?:은|는|도)?\s*(?:제외|(?:참가|응모|지원|신청)\s*불가)")
 _TEAM_MIN = re.compile(r"(\d)\s*[~\-]\s*(\d)\s*인")
 _TEAM_ONLY = re.compile(r"(\d)\s*인\s*이상\s*(?:팀|단체)")
 
@@ -204,21 +208,32 @@ def _check_status(text: str, profile: dict) -> dict:
     if opening:
         evidence = _sentence(text, opening.start())
         return _result("status", VERDICT_PASS, "응모 대상이 열려 있음(제한 없음/누구나)", evidence)
-    found = _STUDENT.search(text)
-    if not found:
+    # 첫 단어만 보면 "대학생, 대학원생, 일반인"에서 뒤의 대상을 놓친다 → 나온 신분을 전부 모은다.
+    allowed: list[str] = []
+    excluded: list[str] = []
+    first: int | None = None
+    for match in _STUDENT.finditer(text):
+        if first is None:
+            first = match.start()
+        bucket = excluded if _EXCLUDED_AFTER.match(text, match.end()) else allowed
+        if match.group(1) not in bucket:
+            bucket.append(match.group(1))
+    if first is None:
         return _result("status", VERDICT_UNKNOWN, "응모 대상(신분) 문구를 찾지 못함")
-    label = found.group(1)
     mine = (profile.get("status") or "").strip()
-    evidence = _sentence(text, found.start())
+    evidence = _sentence(text, first)
+    listed = ", ".join(allowed) or "-"
     if not mine:
-        return _result("status", VERDICT_UNKNOWN, f"'{label}' 대상 — 프로필 status 없음", evidence)
-    if label in {mine, "일반인"}:
-        return _result("status", VERDICT_PASS, f"'{label}' 대상에 내 신분({mine})이 해당", evidence)
-    if label in {"대학생", "학부생"} and mine in {"대학생", "학부생"}:
-        return _result("status", VERDICT_PASS, "대학생 대상", evidence)
-    if label in {"기업", "소상공인"} and mine not in {"기업", "소상공인"}:
-        return _result("status", VERDICT_FAIL, f"'{label}' 대상 — 내 신분({mine})은 해당 없음", evidence)
-    return _result("status", VERDICT_UNKNOWN, f"'{label}' 표기와 내 신분({mine}) 비교 불가", evidence)
+        return _result("status", VERDICT_UNKNOWN, f"'{listed}' 대상 — 프로필 status 없음", evidence)
+    same_as_me = _UNDERGRAD if mine in _UNDERGRAD else {mine}
+    if same_as_me & set(excluded):
+        # '제외'가 어느 범위에 걸리는지는 문장을 읽어야 안다 → fail로 단정하지 않는다.
+        return _result("status", VERDICT_UNKNOWN, f"내 신분({mine})에 '제외' 문구가 붙어 있음 — 원문 확인", evidence)
+    if same_as_me & set(allowed) or "일반인" in allowed:
+        return _result("status", VERDICT_PASS, f"'{listed}' 대상에 내 신분({mine})이 해당", evidence)
+    if allowed and set(allowed) <= _BUSINESS and mine not in _BUSINESS:
+        return _result("status", VERDICT_FAIL, f"'{listed}' 대상 — 내 신분({mine})은 해당 없음", evidence)
+    return _result("status", VERDICT_UNKNOWN, f"'{listed}' 표기와 내 신분({mine}) 비교 불가", evidence)
 
 
 def _check_team(text: str, profile: dict) -> dict:
