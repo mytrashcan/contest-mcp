@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from contest_mcp import db, reuse
+from contest_mcp import db, detail, reuse
 
 BASE = dt.date(2026, 11, 13)
 
@@ -108,3 +108,29 @@ def test_single_token_idea_stays_conservative(tmp_path):
     conn = db.connect(tmp_path / "t.sqlite")
     db.add_idea(conn, "아차맵", base=BASE)
     assert db.similar_ideas(conn, "아차맵 블랙박스 위험구간 지도 서비스") == []
+
+
+def test_parse_keeps_reuse_clause_from_body_notice():
+    """조항이 필드 근거 창(240자) 밖 '유의사항'에만 있어도 본문 스캔으로 잡는다."""
+    filler = "가" * 400
+    html = (
+        "<html><body><p>참가자격: 대학생 누구나</p>"
+        f"<p>{filler}</p>"
+        "<h3>유의사항</h3><p>타 공모전 수상작은 심사에서 제외됩니다.</p></body></html>"
+    )
+    parsed = detail.parse(html, "https://example.com/1", BASE)
+    assert all("타 공모전" not in info["evidence"] for info in parsed["fields"].values())
+    assert "타 공모전" in {clause["pattern"] for clause in parsed["reuse_clauses"]}
+    assert reuse.body_scanned(parsed)
+    patterns = {clause["pattern"] for clause in reuse.detect_clauses(reuse.text_for(parsed))}
+    assert "타 공모전" in patterns
+
+
+def test_old_cached_detail_is_reported_as_not_body_scanned(tmp_path):
+    conn = db.connect(tmp_path / "t.sqlite")
+    old_detail = {"summary": "참가 자격: 대학생", "fields": {}}
+    assert not reuse.body_scanned(old_detail)
+    report = reuse.check(conn, reuse.text_for(old_detail), body_scanned=False)
+    assert report["verdict"] == "clear"
+    assert report["body_scanned"] is False
+    assert "본문 전체는 확인하지 못했습니다" in report["reason"]

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS contest (
     apply_start     TEXT,
     apply_end       TEXT,
     apply_end_basis TEXT,               -- badge | list | detail
+    apply_end_list  TEXT,               -- 목록이 마지막으로 말한 마감일 (연장 감지용)
     status_raw      TEXT,
     views           INTEGER,
     eligibility     TEXT,
@@ -107,12 +108,16 @@ ALLOWED_PROOF = frozenset({"yes", "no", "unknown"})
 ALLOWED_RESULTS = frozenset({"pending", "announced", "won", "lost"})
 
 
+CONTEST_COLUMNS = {"apply_end_list": "TEXT"}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """이전 버전 DB에 없는 컬럼을 붙인다(파괴적 변경 없음)."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(my_list)")}
-    for column, ddl in MY_LIST_COLUMNS.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE my_list ADD COLUMN {column} {ddl}")
+    for table, columns in (("my_list", MY_LIST_COLUMNS), ("contest", CONTEST_COLUMNS)):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, ddl in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -141,6 +146,7 @@ def _row(record: dict, base: dt.date) -> dict:
         "apply_start": record.get("apply_start"),
         "apply_end": record.get("apply_end"),
         "apply_end_basis": record.get("apply_end_basis") or "list",
+        "apply_end_list": record.get("apply_end"),
         "status_raw": record.get("status_raw"),
         "views": record.get("views"),
         "eligibility": record.get("eligibility"),
@@ -152,7 +158,11 @@ def _row(record: dict, base: dt.date) -> dict:
 
 
 def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | None = None) -> dict:
-    """레코드를 저장. 상세에서 얻은 마감일(basis=detail)은 목록 날짜로 덮어쓰지 않는다."""
+    """레코드를 저장. 상세에서 얻은 마감일(basis=detail)은 목록 날짜로 덮어쓰지 않는다.
+
+    단, **소스가 스스로 날짜를 옮긴 경우**(직전 목록 값과 이번 목록 값이 다름)는 예외다.
+    그건 상세 캐시가 낡았다는 뜻이므로 새 값을 받아들여 변경으로 기록하고, 상세를 다시 받게 한다.
+    """
     ref = base or util.today()
     stats = {"new": 0, "updated": 0}
     for record in records:
@@ -160,7 +170,8 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
             continue
         fresh = _row(record, ref)
         existing = conn.execute(
-            "SELECT name, apply_start, apply_end, apply_end_basis, prize FROM contest WHERE id = ?",
+            "SELECT name, apply_start, apply_end, apply_end_basis, apply_end_list, prize "
+            "FROM contest WHERE id = ?",
             (fresh["id"],),
         ).fetchone()
         if existing is None:
@@ -172,9 +183,18 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
 
         old_rank = BASIS_RANK.get(existing["apply_end_basis"] or "list", 0)
         new_rank = BASIS_RANK.get(fresh["apply_end_basis"], 0)
+        listed = fresh["apply_end"]
+        previous_listed = existing["apply_end_list"]
+        if not listed:
+            fresh["apply_end_list"] = previous_listed  # 이번에 날짜가 안 왔으면 직전 목록 값을 유지
         if existing["apply_end"] and old_rank > new_rank:
-            fresh["apply_end"] = existing["apply_end"]
-            fresh["apply_end_basis"] = existing["apply_end_basis"]
+            moved = bool(listed and previous_listed and listed != previous_listed)
+            if moved and listed != existing["apply_end"]:
+                # 새 값을 그대로 두면 아래 변경 감지가 '기존 → 새 값'으로 기록한다.
+                fresh["detail_at"] = None  # 상세 캐시 만료 → 다음 조회 때 원문을 다시 받는다
+            else:
+                fresh["apply_end"] = existing["apply_end"]
+                fresh["apply_end_basis"] = existing["apply_end_basis"]
 
         for field in TRACKED_FIELDS:
             old_value = existing[field]
@@ -483,6 +503,17 @@ def my_list(
 
 def submitted_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT contest_id FROM my_list WHERE state = 'submitted'")}
+
+
+def flag_submitted(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
+    """검색 결과에 ``already_submitted`` 를 붙인다. 그룹의 **어느 행**에 제출 기록이 있어도 참이다.
+
+    대표 id는 근거 순위·마감일로 매번 다시 뽑히므로, 대표 하나만 비교하면 낸 공고가 안 낸 것으로 보인다.
+    """
+    submitted = submitted_ids(conn)
+    for item in items:
+        item["already_submitted"] = any(cid in submitted for cid in item.get("ids") or [item["id"]])
+    return items
 
 
 def add_idea(

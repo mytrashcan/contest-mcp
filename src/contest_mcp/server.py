@@ -126,9 +126,7 @@ def build_server():
                 limit=limit,
                 sort=sort,
             )
-            submitted = db.submitted_ids(conn)
-            for item in items:
-                item["already_submitted"] = item["id"] in submitted
+            db.flag_submitted(conn, items)
             return {"count": len(items), "sort": sort, "items": items}
         finally:
             conn.close()
@@ -368,23 +366,25 @@ def build_server():
             item = db.get(conn, ident)
             if item is None:
                 return {"found": False, "ident": ident}
-            if not item.get("detail"):
+            old = item.get("detail")
+            # 본문 조항(reuse_clauses)이 없는 캐시는 이전 버전이 만든 것 → 본문을 보려면 다시 받아야 한다.
+            if not reuse.body_scanned(old):
                 try:
                     parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    if old and old.get("attachment_text"):
+                        parsed["attachment_text"] = old["attachment_text"]
                     db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
                     item["detail"] = parsed
                 except Exception as exc:
-                    return {"found": True, "id": item["id"], "error": f"상세 파싱 실패: {exc}"}
+                    if not old:
+                        return {"found": True, "id": item["id"], "error": f"상세 파싱 실패: {exc}"}
             detail_data = item.get("detail") or {}
-            fields = detail_data.get("fields") or {}
-            text = " ".join(
-                filter(
-                    None,
-                    [detail_data.get("summary") or "", detail_data.get("attachment_text") or ""]
-                    + [info.get("evidence") or "" for info in fields.values()],
-                )
+            report = reuse.check(
+                conn,
+                reuse.text_for(detail_data),
+                idea_label=idea_label,
+                body_scanned=reuse.body_scanned(detail_data),
             )
-            report = reuse.check(conn, text, idea_label=idea_label)
             return {"found": True, "id": item["id"], "name": item["name"], "url": item["url"], **report}
         finally:
             conn.close()

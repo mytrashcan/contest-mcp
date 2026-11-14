@@ -84,7 +84,8 @@ def build(
                     mark += f"({', '.join(verdict['failed_axes'])})"
                 badges.append(mark)
 
-        changes = changes_by_contest.get(item["id"], [])
+        # 변경은 그룹의 어느 소스 행에서든 감지될 수 있다 → 대표 id만 보지 않는다.
+        changes = [change for cid in item["ids"] for change in changes_by_contest.get(cid, [])]
         if changes:
             labels = ", ".join(
                 f"{FIELD_LABEL.get(change['field'], change['field'])} {change['old_value']}→{change['new_value']}"
