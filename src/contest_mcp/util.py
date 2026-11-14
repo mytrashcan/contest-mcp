@@ -37,6 +37,19 @@ ENTITIES = {
 }
 
 
+class EmptyListing(RuntimeError):
+    """첫 페이지에서 한 건도 읽지 못했다 — 사이트 구조가 바뀌었을 가능성이 크다."""
+
+
+def ensure_first_page(label: str, page: int) -> None:
+    """목록이 비었을 때 호출한다. 첫 페이지라면 '끝'이 아니라 '파서가 깨짐'이므로 오류로 올린다.
+
+    조용히 0건을 돌려주면 refresh 결과가 정상처럼 보여 소스가 죽은 걸 한참 뒤에야 알게 된다.
+    """
+    if page == 1:
+        raise EmptyListing(f"{label}: 첫 페이지에서 0건 — 사이트 구조 변경 또는 차단 의심")
+
+
 def today(tz: ZoneInfo = SEOUL) -> dt.date:
     """서울 기준 오늘."""
     return dt.datetime.now(tz).date()

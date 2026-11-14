@@ -106,3 +106,46 @@ def test_city_level_restriction_is_reported_as_unknown():
     axis = _axis(eligibility.check("지원 자격: 포항 거주 만 18세 이상 누구나", PROFILE), "region")
     assert axis["verdict"] == "unknown"
     assert "광역" in axis["reason"] or "시·군" in axis["reason"]
+
+
+def test_qualified_everyone_is_not_an_open_target():
+    """'대학생이라면 누구나'는 열린 대상이 아니다 — 일반인에게 pass를 주면 안 된다."""
+    text = "참가자격: 전국 대학생이라면 누구나"
+    assert _axis(eligibility.check(text, {**PROFILE, "status": "일반인"}), "status")["verdict"] == "unknown"
+    assert _axis(eligibility.check(text, PROFILE), "status")["verdict"] == "pass"
+
+
+def test_everyone_up_to_general_public_is_still_open():
+    text = "참가자격: 초등학생부터 일반인까지 누구나"
+    assert _axis(eligibility.check(text, {**PROFILE, "status": "일반인"}), "status")["verdict"] == "pass"
+
+
+def test_no_limit_on_another_item_is_not_open_status():
+    text = "참가자격: 대학생 (전공 제한 없음)"
+    assert _axis(eligibility.check(text, {**PROFILE, "status": "일반인"}), "status")["verdict"] == "unknown"
+
+
+def test_age_lower_and_upper_bound_are_both_checked():
+    text = "만 19세 이상 39세 이하 청년"
+    assert _axis(eligibility.check(text, {**PROFILE, "age": 45}), "age")["verdict"] == "fail"
+    assert _axis(eligibility.check(text, PROFILE), "age")["verdict"] == "pass"
+    # 요약·본문에 같은 조건이 반복돼도 결과는 같다
+    assert _axis(eligibility.check(f"{text} / {text}", PROFILE), "age")["verdict"] == "pass"
+
+
+def test_age_range_without_first_unit():
+    assert _axis(eligibility.check("만 19~39세 청년", {**PROFILE, "age": 45}), "age")["verdict"] == "fail"
+    assert _axis(eligibility.check("만 19~39세 청년", PROFILE), "age")["verdict"] == "pass"
+
+
+def test_age_conditions_per_division_stay_unknown():
+    """부문별 연령(청소년부/일반부)을 한 사람에게 모두 적용해 fail을 내지 않는다."""
+    text = "청소년부: 만 18세 이하 / 일반부: 만 19세 이상"
+    assert _axis(eligibility.check(text, PROFILE), "age")["verdict"] == "unknown"
+
+
+def test_individual_or_team_is_not_a_team_requirement():
+    profile = {**PROFILE, "team_available": False}
+    assert _axis(eligibility.check("개인 또는 팀(2~4인) 참가", profile), "team")["verdict"] == "pass"
+    assert _axis(eligibility.check("팀(2~4인) 또는 개인 참가", profile), "team")["verdict"] == "pass"
+    assert _axis(eligibility.check("2~4인 팀 구성 필수", profile), "team")["verdict"] == "fail"

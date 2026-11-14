@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "contest-mcp"
 version = "0.1.0"
-description = "한국 공모전·대외활동을 수집해 조회하는 MCP 서버 (위비티·씽굿·올콘)"
+description = "한국 공모전·대외활동을 수집해 조회하는 MCP 서버 (위비티·씽굿·올콘·링커리어·콘테스트코리아)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "JEONG KITAE" }]
-keywords = ["mcp", "contest", "korea", "공모전", "wevity", "thinkgood", "allcon"]
+keywords = ["mcp", "contest", "korea", "공모전", "wevity", "thinkgood", "allcon", "linkareer", "contestkorea"]
 dependencies = ["mcp>=1.2.0"]
 
 [project.optional-dependencies]

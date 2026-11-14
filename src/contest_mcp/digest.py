@@ -56,7 +56,9 @@ def build(
     use_profile: bool = True,
 ) -> dict:
     ref = base or util.today()
-    items = db.search(conn, dday_max=days, status="open", limit=limit, sort="views_low", base=ref)
+    items = db.search(
+        conn, dday_max=days, status="open", limit=limit, sort="views_low", base=ref, include_undated=False
+    )
     recent_changes = db.changes(conn, days=days, base=ref)
     changes_by_contest: dict[str, list[dict]] = {}
     for change in recent_changes:
@@ -84,7 +86,8 @@ def build(
                     mark += f"({', '.join(verdict['failed_axes'])})"
                 badges.append(mark)
 
-        changes = changes_by_contest.get(item["id"], [])
+        # 변경은 그룹의 어느 소스 행에서든 감지될 수 있다 → 대표 id만 보지 않는다.
+        changes = [change for cid in item["ids"] for change in changes_by_contest.get(cid, [])]
         if changes:
             labels = ", ".join(
                 f"{FIELD_LABEL.get(change['field'], change['field'])} {change['old_value']}→{change['new_value']}"

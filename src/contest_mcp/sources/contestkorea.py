@@ -80,6 +80,7 @@ def fetch(fetcher: Fetcher, *, max_pages: int = 5, base: dt.date | None = None) 
     for page in range(1, max_pages + 1):
         rows = parse_list(fetcher.get(LIST_URL.format(page=page)), ref)
         if not rows:
+            util.ensure_first_page(LABEL, page)
             break
         for row in rows:
             if (row["status_raw"] or "") == "마감":

@@ -1,4 +1,4 @@
-"""MCP 서버 (stdio). 툴 5개 + ICS 생성 옵션.
+"""MCP 서버 (stdio). 툴 12개 + ICS 생성 옵션.
 
     contest-mcp            # stdio 서버 실행
     python -m contest_mcp.cli --help   # 서버 없이 CLI로 같은 기능
@@ -11,10 +11,11 @@ from __future__ import annotations
 import datetime as dt
 import os
 from pathlib import Path
+from typing import Literal
 
 from . import attachments, db, detail, eligibility, ics, profile, reuse, util
 from . import digest as digest_report
-from .http import DEFAULT_INSECURE_HOSTS, Fetcher
+from .http import Fetcher
 from .sources import SOURCES
 
 DEFAULT_DB = "~/.contest-mcp/db.sqlite"
@@ -28,6 +29,17 @@ def _connect():
     return db.connect(db_path())
 
 
+_SHARED_FETCHER: Fetcher | None = None
+
+
+def _fetcher() -> Fetcher:
+    """툴 호출 사이에도 호스트별 요청 간격과 robots 캐시가 유지되도록 하나를 돌려 쓴다."""
+    global _SHARED_FETCHER
+    if _SHARED_FETCHER is None:
+        _SHARED_FETCHER = Fetcher()
+    return _SHARED_FETCHER
+
+
 def refresh_sources(
     sources: list[str] | None = None,
     *,
@@ -37,7 +49,7 @@ def refresh_sources(
 ) -> dict:
     """소스들을 수집해 DB에 반영. 소스별 결과와 경고를 함께 돌려준다."""
     ref = base or util.today()
-    fetcher = fetcher or Fetcher(insecure_hosts=DEFAULT_INSECURE_HOSTS)
+    fetcher = fetcher or _fetcher()
     names = sources or list(SOURCES)
     conn = _connect()
     report: dict = {"date": ref.isoformat(), "sources": {}, "warnings": []}
@@ -60,7 +72,7 @@ def refresh_sources(
                 "updated": stats["updated"],
             }
             db.record_run(conn, name, fetched=len(records), kept=len(records), base=ref)
-        report["warnings"] = fetcher.warnings
+        report["warnings"] = list(fetcher.warnings)
         totals = conn.execute(
             "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE apply_end >= ?) AS open FROM contest",
             (ref.isoformat(),),
@@ -99,9 +111,9 @@ def build_server():
         field: str | None = None,
         region: str | None = None,
         dday_max: int = 45,
-        status: str = "open",
+        status: Literal["open", "upcoming", "all"] = "open",
         limit: int = 20,
-        sort: str = "dday",
+        sort: Literal["dday", "views_low", "views_high", "name"] = "dday",
     ) -> dict:
         """공모전을 검색한다 (같은 공고는 여러 소스에 있어도 1건으로 묶인다).
 
@@ -126,9 +138,7 @@ def build_server():
                 limit=limit,
                 sort=sort,
             )
-            submitted = db.submitted_ids(conn)
-            for item in items:
-                item["already_submitted"] = item["id"] in submitted
+            db.flag_submitted(conn, items)
             return {"count": len(items), "sort": sort, "items": items}
         finally:
             conn.close()
@@ -152,7 +162,7 @@ def build_server():
             today = util.today().isoformat()
             if refresh_detail and (cached is None or item.get("detail_checked_at") != today):
                 try:
-                    parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    parsed = detail.fetch_and_parse(_fetcher(), item["url"])
                     db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
                     item["detail"] = parsed
                     item["detail_checked_at"] = today
@@ -163,7 +173,7 @@ def build_server():
                 if already:
                     item["attachment_cached"] = True
                 else:
-                    fetcher = Fetcher()
+                    fetcher = _fetcher()
                     results = []
                     texts: list[str] = []
                     for link in (item["detail"].get("attachments") or [])[:2]:
@@ -192,7 +202,7 @@ def build_server():
         """소스에서 목록을 다시 수집해 DB를 갱신한다.
 
         Args:
-            sources: 수집할 소스 이름 목록 (wevity, thinkgood, allcon). 생략하면 전체.
+            sources: 수집할 소스 이름 목록 (wevity, thinkgood, allcon, linkareer, contestkorea). 생략하면 전체.
             max_pages: 소스별 최대 페이지 수.
         """
         return refresh_sources(sources, max_pages=max_pages)
@@ -218,7 +228,7 @@ def build_server():
         conn = _connect()
         try:
             limit_days = dday_max if dday_max is not None else days
-            items = db.search(conn, dday_max=limit_days, status="open", limit=200)
+            items = db.search(conn, dday_max=limit_days, status="open", limit=200, include_undated=False)
             events = [
                 {
                     "date": item["apply_end"],
@@ -258,8 +268,11 @@ def build_server():
                 else None,
             }
             if ics_path and events:
-                result["ics"] = str(ics.write(events, ics_path))
-                result["ics_events"] = len(events)
+                try:
+                    result["ics"] = str(ics.write(events, ics_path))
+                    result["ics_events"] = len(events)
+                except ics.UnsafePath as exc:
+                    result["ics_error"] = str(exc)
             return result
         finally:
             conn.close()
@@ -267,13 +280,13 @@ def build_server():
     @mcp.tool()
     def mark(
         ident: str,
-        state: str,
+        state: Literal["submitted", "dropped", "skip"],
         note: str = "",
         submitted_at: str | None = None,
-        channel: str | None = None,
-        proof: str | None = None,
+        channel: Literal["email", "form", "site", "other"] | None = None,
+        proof: Literal["yes", "no", "unknown"] | None = None,
         proof_path: str | None = None,
-        result: str | None = None,
+        result: Literal["pending", "announced", "won", "lost"] | None = None,
         result_note: str | None = None,
     ) -> dict:
         """공모전에 내 상태와 제출 이력을 기록한다.
@@ -316,7 +329,10 @@ def build_server():
             conn.close()
 
     @mcp.tool()
-    def my_list(state: str | None = None, missing_proof: bool = False) -> dict:
+    def my_list(
+        state: Literal["submitted", "dropped", "skip"] | None = None,
+        missing_proof: bool = False,
+    ) -> dict:
         """내가 표시한 공고 목록 (제출/버림/관심 없음).
 
         Args:
@@ -368,23 +384,25 @@ def build_server():
             item = db.get(conn, ident)
             if item is None:
                 return {"found": False, "ident": ident}
-            if not item.get("detail"):
+            old = item.get("detail")
+            # 본문 조항(reuse_clauses)이 없는 캐시는 이전 버전이 만든 것 → 본문을 보려면 다시 받아야 한다.
+            if not reuse.body_scanned(old):
                 try:
-                    parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    parsed = detail.fetch_and_parse(_fetcher(), item["url"])
+                    if old and old.get("attachment_text"):
+                        parsed["attachment_text"] = old["attachment_text"]
                     db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
                     item["detail"] = parsed
                 except Exception as exc:
-                    return {"found": True, "id": item["id"], "error": f"상세 파싱 실패: {exc}"}
+                    if not old:
+                        return {"found": True, "id": item["id"], "error": f"상세 파싱 실패: {exc}"}
             detail_data = item.get("detail") or {}
-            fields = detail_data.get("fields") or {}
-            text = " ".join(
-                filter(
-                    None,
-                    [detail_data.get("summary") or "", detail_data.get("attachment_text") or ""]
-                    + [info.get("evidence") or "" for info in fields.values()],
-                )
+            report = reuse.check(
+                conn,
+                reuse.text_for(detail_data),
+                idea_label=idea_label,
+                body_scanned=reuse.body_scanned(detail_data),
             )
-            report = reuse.check(conn, text, idea_label=idea_label)
             return {"found": True, "id": item["id"], "name": item["name"], "url": item["url"], **report}
         finally:
             conn.close()
@@ -406,7 +424,7 @@ def build_server():
                 return {"found": False, "ident": ident, "hint": "먼저 refresh로 목록을 수집하세요."}
             if not item.get("detail"):
                 try:
-                    parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+                    parsed = detail.fetch_and_parse(_fetcher(), item["url"])
                     db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
                     item["detail"] = parsed
                 except Exception as exc:

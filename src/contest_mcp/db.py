@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS contest (
     apply_start     TEXT,
     apply_end       TEXT,
     apply_end_basis TEXT,               -- badge | list | detail
+    apply_end_list  TEXT,               -- 목록이 마지막으로 말한 마감일 (연장 감지용)
     status_raw      TEXT,
     views           INTEGER,
     eligibility     TEXT,
@@ -79,6 +80,7 @@ TRACKED_FIELDS = ("name", "apply_start", "apply_end", "prize")
 
 BASIS_RANK = {"badge": 0, "list": 1, "detail": 2}
 MIN_MERGE_TOKENS = 3
+STALE_UNDATED_DAYS = 14
 
 
 def _mergeable(left: set[str], right: set[str]) -> bool:
@@ -107,12 +109,16 @@ ALLOWED_PROOF = frozenset({"yes", "no", "unknown"})
 ALLOWED_RESULTS = frozenset({"pending", "announced", "won", "lost"})
 
 
+CONTEST_COLUMNS = {"apply_end_list": "TEXT"}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """이전 버전 DB에 없는 컬럼을 붙인다(파괴적 변경 없음)."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(my_list)")}
-    for column, ddl in MY_LIST_COLUMNS.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE my_list ADD COLUMN {column} {ddl}")
+    for table, columns in (("my_list", MY_LIST_COLUMNS), ("contest", CONTEST_COLUMNS)):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, ddl in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -129,6 +135,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def _row(record: dict, base: dt.date) -> dict:
     name = record["name"]
+    basis = record.get("apply_end_basis") or "list"
+    # 목록이 말한 날짜만 '목록 값'으로 기억한다. 상세에서 온 날짜를 섞으면 다음 목록 값이 '이동'으로 보인다.
+    listed = record.get("apply_end") if basis != "detail" else None
     return {
         "id": f"{record['source']}:{record['key']}",
         "source": record["source"],
@@ -140,7 +149,8 @@ def _row(record: dict, base: dt.date) -> dict:
         "field": record.get("field"),
         "apply_start": record.get("apply_start"),
         "apply_end": record.get("apply_end"),
-        "apply_end_basis": record.get("apply_end_basis") or "list",
+        "apply_end_basis": basis,
+        "apply_end_list": listed,
         "status_raw": record.get("status_raw"),
         "views": record.get("views"),
         "eligibility": record.get("eligibility"),
@@ -152,7 +162,11 @@ def _row(record: dict, base: dt.date) -> dict:
 
 
 def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | None = None) -> dict:
-    """레코드를 저장. 상세에서 얻은 마감일(basis=detail)은 목록 날짜로 덮어쓰지 않는다."""
+    """레코드를 저장. 상세에서 얻은 마감일(basis=detail)은 목록 날짜로 덮어쓰지 않는다.
+
+    단, **소스가 스스로 날짜를 옮긴 경우**(직전 목록 값과 이번 목록 값이 다름)는 예외다.
+    그건 상세 캐시가 낡았다는 뜻이므로 새 값을 받아들여 변경으로 기록하고, 상세를 다시 받게 한다.
+    """
     ref = base or util.today()
     stats = {"new": 0, "updated": 0}
     for record in records:
@@ -160,7 +174,8 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
             continue
         fresh = _row(record, ref)
         existing = conn.execute(
-            "SELECT name, apply_start, apply_end, apply_end_basis, prize FROM contest WHERE id = ?",
+            "SELECT name, apply_start, apply_end, apply_end_basis, apply_end_list, prize "
+            "FROM contest WHERE id = ?",
             (fresh["id"],),
         ).fetchone()
         if existing is None:
@@ -172,9 +187,18 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
 
         old_rank = BASIS_RANK.get(existing["apply_end_basis"] or "list", 0)
         new_rank = BASIS_RANK.get(fresh["apply_end_basis"], 0)
+        listed = fresh["apply_end_list"]
+        previous_listed = existing["apply_end_list"]
+        if not listed:
+            fresh["apply_end_list"] = previous_listed  # 이번에 날짜가 안 왔으면 직전 목록 값을 유지
         if existing["apply_end"] and old_rank > new_rank:
-            fresh["apply_end"] = existing["apply_end"]
-            fresh["apply_end_basis"] = existing["apply_end_basis"]
+            moved = bool(listed and previous_listed and listed != previous_listed)
+            if moved and listed != existing["apply_end"]:
+                # 새 값을 그대로 두면 아래 변경 감지가 '기존 → 새 값'으로 기록한다.
+                fresh["detail_at"] = None  # 상세 캐시 만료 → 다음 조회 때 원문을 다시 받는다
+            else:
+                fresh["apply_end"] = existing["apply_end"]
+                fresh["apply_end_basis"] = existing["apply_end_basis"]
 
         for field in TRACKED_FIELDS:
             old_value = existing[field]
@@ -321,10 +345,14 @@ def search(
     limit: int = 20,
     sort: str = "dday",
     base: dt.date | None = None,
+    include_undated: bool = True,
 ) -> list[dict]:
     """그룹 중복을 제거한 검색. ``status='all'`` 이면 마감 포함.
 
     ``sort``: ``dday``(마감 임박) · ``views_low``(조회 적은 순 = 경쟁 약함) · ``views_high`` · ``name``.
+
+    마감일이 없는 공고는 날짜로 닫을 수 없으므로, 목록에서 ``STALE_UNDATED_DAYS`` 일 넘게 안 보이면
+    진행 중으로 치지 않는다. ``include_undated=False`` 면 마감일 없는 공고를 아예 뺀다("D-N 이내" 용).
     """
     ref = base or util.today()
     clauses: list[str] = []
@@ -339,8 +367,8 @@ def search(
         clauses.append("region LIKE ?")
         params.append(f"%{region}%")
     if status == "open":
-        clauses.append("(apply_end IS NULL OR apply_end >= ?)")
-        params.append(ref.isoformat())
+        clauses.append("(apply_end >= ? OR (apply_end IS NULL AND last_seen >= ?))")
+        params.extend([ref.isoformat(), (ref - dt.timedelta(days=STALE_UNDATED_DAYS)).isoformat()])
     elif status == "upcoming":
         clauses.append("apply_start > ?")
         params.append(ref.isoformat())
@@ -354,6 +382,8 @@ def search(
         grouped = [item for item in grouped if item["status"] in {"open", "unknown"}]
     elif status == "upcoming":
         grouped = [item for item in grouped if item["status"] == "upcoming"]
+    if not include_undated:
+        grouped = [item for item in grouped if item["dday"] is not None]
     if dday_max is not None:
         grouped = [item for item in grouped if item["dday"] is None or item["dday"] <= dday_max]
     if sort == "views_low":
@@ -367,22 +397,62 @@ def search(
     return grouped[:limit]
 
 
+class AmbiguousIdent(ValueError):
+    """ident가 둘 이상의 공고에 걸린다 — 아무거나 고르면 엉뚱한 공고에 기록이 남는다."""
+
+    def __init__(self, ident: str, ids: list[str]) -> None:
+        self.ident = ident
+        self.ids = ids
+        shown = ", ".join(ids[:5])
+        super().__init__(f"'{ident}'에 해당하는 공고가 여러 개입니다({shown}). source:key 형태의 id로 지정하세요.")
+
+
+MIN_URL_FRAGMENT = 6  # 이보다 짧은 조각으로 URL 부분 일치를 하면 아무 공고나 걸린다
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _resolve(conn: sqlite3.Connection, ident: str) -> sqlite3.Row | None:
+    """ident → contest 행 1개. 정확 일치(id·url) → key 일치 → URL 부분 일치 순이며, 여러 개면 고르지 않는다."""
+    if not ident:
+        return None
+    for column in ("id", "url"):
+        row = conn.execute(f"SELECT * FROM contest WHERE {column} = ?", (ident,)).fetchone()
+        if row is not None:
+            return row
+    tail = ident.rstrip("/").rsplit("=", 1)[-1].strip()
+    if not tail:
+        return None
+    rows = conn.execute("SELECT * FROM contest WHERE key = ? LIMIT 6", (tail,)).fetchall()
+    if not rows and len(tail) >= MIN_URL_FRAGMENT:
+        rows = conn.execute(
+            "SELECT * FROM contest WHERE url LIKE ? ESCAPE '\\' LIMIT 6",
+            (f"%{_like_escape(tail)}%",),
+        ).fetchall()
+    if len(rows) > 1:
+        raise AmbiguousIdent(ident, [row["id"] for row in rows])
+    return rows[0] if rows else None
+
+
 def get(conn: sqlite3.Connection, ident: str, base: dt.date | None = None) -> dict | None:
-    """id·url·ix·contest_pk 어느 형태로도 조회."""
-    ident = (ident or "").strip()
-    row = conn.execute("SELECT * FROM contest WHERE id = ?", (ident,)).fetchone()
-    if row is None:
-        row = conn.execute("SELECT * FROM contest WHERE url = ?", (ident,)).fetchone()
-    if row is None:
-        tail = ident.rstrip("/").rsplit("=", 1)[-1]
-        row = conn.execute(
-            "SELECT * FROM contest WHERE key = ? OR url LIKE ? LIMIT 1", (tail, f"%{tail}%")
-        ).fetchone()
+    """id·url·ix·contest_pk 어느 형태로도 조회. 여러 공고에 걸리면 ``AmbiguousIdent`` 를 올린다."""
+    row = _resolve(conn, (ident or "").strip())
     if row is None:
         return None
-    siblings = conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)).fetchall()
+    if row["group_id"]:
+        siblings = conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)).fetchall()
+    else:
+        siblings = [row]  # 이름이 정규화되면 빈 문자열인 행끼리는 같은 공고가 아니다
     item = _group(siblings, base or util.today())[0]
-    item["detail"] = json.loads(row["detail_json"]) if row["detail_json"] else None
+    # 상세는 대표 id에 저장된다(save_detail). 요청한 행이 대표가 아니어도 그 캐시를 읽어야 한다.
+    by_id = {sibling["id"]: sibling for sibling in siblings}
+    cached = [by_id[item["id"]], row, *siblings]
+    holder = next((candidate for candidate in cached if candidate["detail_json"]), None)
+    item["detail"] = json.loads(holder["detail_json"]) if holder is not None else None
+    if holder is not None:
+        item["detail_checked_at"] = holder["detail_at"]
     return item
 
 
@@ -483,6 +553,17 @@ def my_list(
 
 def submitted_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT contest_id FROM my_list WHERE state = 'submitted'")}
+
+
+def flag_submitted(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
+    """검색 결과에 ``already_submitted`` 를 붙인다. 그룹의 **어느 행**에 제출 기록이 있어도 참이다.
+
+    대표 id는 근거 순위·마감일로 매번 다시 뽑히므로, 대표 하나만 비교하면 낸 공고가 안 낸 것으로 보인다.
+    """
+    submitted = submitted_ids(conn)
+    for item in items:
+        item["already_submitted"] = any(cid in submitted for cid in item.get("ids") or [item["id"]])
+    return items
 
 
 def add_idea(

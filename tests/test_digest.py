@@ -130,3 +130,28 @@ def test_digest_reports_recent_changes(tmp_path):
     report = digest.build(conn, days=7, base=BASE, use_profile=False)
     assert "최근 7일 변경 1건" in report["text"]
     assert "마감 2026-11-15→2026-11-22" in report["text"]
+
+
+def test_digest_skips_undated_contests(tmp_path):
+    """D-N 이내 브리핑에 마감일 없는 공고가 D-None 으로 섞이지 않는다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    _seed(conn)
+    db.upsert_many(
+        conn,
+        [
+            {
+                "source": "wevity",
+                "key": "9",
+                "name": "날짜 없는 공모전",
+                "host": "주최",
+                "url": "https://example.com/9",
+                "apply_end": None,
+                "apply_end_basis": "list",
+                "views": 1,
+            }
+        ],
+        BASE,
+    )
+    report = digest.build(conn, days=7, base=BASE, use_profile=False)
+    assert "D-None" not in report["text"]
+    assert all(item["dday"] is not None for item in report["items"])

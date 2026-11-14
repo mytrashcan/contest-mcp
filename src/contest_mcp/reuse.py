@@ -51,8 +51,32 @@ def detect_clauses(text: str, width: int = 120) -> list[dict]:
     return found
 
 
-def check(conn, text: str, *, idea_label: str | None = None, threshold: float = 0.5) -> dict:
-    """재출품 조항 + (선택) 내 아이디어 유사도."""
+def body_scanned(detail_data: dict | None) -> bool:
+    """상세 파싱이 본문 전체에서 조항을 모아 뒀는지(이전 버전 캐시에는 이 키가 없다)."""
+    return "reuse_clauses" in (detail_data or {})
+
+
+def text_for(detail_data: dict | None) -> str:
+    """조항 탐지에 넘길 텍스트: 요약·첨부·필드 근거 + 본문 전체에서 모아 둔 조항 문장."""
+    data = detail_data or {}
+    parts = [data.get("summary") or "", data.get("attachment_text") or ""]
+    parts += [info.get("evidence") or "" for info in (data.get("fields") or {}).values()]
+    parts += [clause.get("evidence") or "" for clause in data.get("reuse_clauses") or []]
+    return " / ".join(part for part in parts if part)
+
+
+def check(
+    conn,
+    text: str,
+    *,
+    idea_label: str | None = None,
+    threshold: float = 0.5,
+    body_scanned: bool = True,
+) -> dict:
+    """재출품 조항 + (선택) 내 아이디어 유사도.
+
+    ``body_scanned=False`` 는 본문 전체를 보지 못했다는 뜻이다(상세 재수집 실패). 그때 'clear'는 믿을 수 없다.
+    """
     clauses = detect_clauses(text)
     similar = db.similar_ideas(conn, idea_label, threshold=threshold) if idea_label else []
     if clauses and similar:
@@ -67,9 +91,12 @@ def check(conn, text: str, *, idea_label: str | None = None, threshold: float = 
     else:
         verdict = "clear"
         reason = "재출품 제한 조항을 찾지 못했고 유사 아이디어도 없습니다(조항이 첨부파일에만 있을 수 있음)."
+    if not clauses and not body_scanned:
+        reason += " 단, 본문 전체는 확인하지 못했습니다(상세 재수집 실패) — 원문 유의사항을 직접 확인하세요."
     return {
         "verdict": verdict,
         "reason": reason,
+        "body_scanned": body_scanned,
         "clauses": clauses,
         "similar_ideas": similar,
         "idea_label": idea_label,

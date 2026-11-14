@@ -62,7 +62,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 0
     for item in items:
         dday = f"D-{item['dday']}" if item["dday"] is not None else "D-?"
-        flag = " [제출함]" if item["id"] in submitted else ""
+        flag = " [제출함]" if submitted.intersection(item["ids"]) else ""
         views = f" 조회 {item['views']:,}" if item.get("views") else ""
         print(f"{dday:>6} {item['apply_end'] or '날짜없음'} | {item['name'][:60]}")
         print(f"       {item['host'] or '-'} · {'/'.join(item['sources'])}{views}{flag}")
@@ -120,7 +120,7 @@ def cmd_detail(args: argparse.Namespace) -> int:
 def cmd_deadlines(args: argparse.Namespace) -> int:
     conn = _open()
     try:
-        items = db.search(conn, dday_max=args.days, status="open", limit=200)
+        items = db.search(conn, dday_max=args.days, status="open", limit=200, include_undated=False)
         announcements = []
         if not args.no_announce:
             today = util.today()
@@ -308,20 +308,25 @@ def cmd_reuse(args: argparse.Namespace) -> int:
         if item is None:
             print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
             return 1
-        if not item.get("detail"):
-            parsed = detail.fetch_and_parse(Fetcher(), item["url"])
-            db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
-            item["detail"] = parsed
+        old = item.get("detail")
+        if not reuse.body_scanned(old):  # 이전 버전 캐시는 본문 조항이 없다 → 다시 받는다
+            try:
+                parsed = detail.fetch_and_parse(Fetcher(), item["url"])
+            except Exception:
+                if not old:
+                    raise
+            else:
+                if old and old.get("attachment_text"):
+                    parsed["attachment_text"] = old["attachment_text"]
+                db.save_detail(conn, item["id"], parsed, apply_end=parsed.get("deadline_from_detail"))
+                item["detail"] = parsed
         detail_data = item.get("detail") or {}
-        fields = detail_data.get("fields") or {}
-        text = " ".join(
-            filter(
-                None,
-                [detail_data.get("summary") or "", detail_data.get("attachment_text") or ""]
-                + [info.get("evidence") or "" for info in fields.values()],
-            )
+        report = reuse.check(
+            conn,
+            reuse.text_for(detail_data),
+            idea_label=args.idea,
+            body_scanned=reuse.body_scanned(detail_data),
         )
-        report = reuse.check(conn, text, idea_label=args.idea)
     finally:
         conn.close()
     if args.json:
@@ -418,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "json", False) and args.command == "detail":
         pass
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (db.AmbiguousIdent, ics.UnsafePath) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

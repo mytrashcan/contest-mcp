@@ -169,3 +169,33 @@ def test_unrelated_long_names_stay_separate(tmp_path):
     )
     # 토큰 집합이 서로를 포함하지 않으므로(부문이 다름) 별개로 남는다
     assert len(db.search(conn, dday_max=30, base=BASE)) == 2
+
+
+def test_get_reads_detail_cache_for_non_representative_id(tmp_path):
+    """상세는 그룹 대표 id에 저장된다 — 다른 소스의 id로 물어도 그 캐시를 읽어야 한다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(
+        conn,
+        [
+            _rec("wevity", "1", "A 공모전", "2026-11-20", basis="badge"),
+            _rec("thinkgood", "9", "A 공모전", "2026-11-21"),
+        ],
+        BASE,
+    )
+    representative = db.get(conn, "wevity:1", BASE)
+    assert representative["id"] == "thinkgood:9"
+    db.save_detail(conn, representative["id"], {"summary": "요약"}, base=BASE)
+    again = db.get(conn, "wevity:1", BASE)
+    assert again["detail"]["summary"] == "요약"
+    assert again["detail_checked_at"] == BASE.isoformat()
+
+
+def test_undated_contest_drops_out_when_no_longer_listed(tmp_path):
+    """마감일이 없는 공고는 날짜로 닫을 수 없으니, 목록에서 사라진 지 오래면 진행 중으로 치지 않는다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(conn, [_rec("wevity", "1", "날짜 없는 공모전", None)], BASE)
+    assert [item["name"] for item in db.search(conn, base=BASE)] == ["날짜 없는 공모전"]
+    assert db.search(conn, base=BASE, include_undated=False) == []
+    later = BASE + dt.timedelta(days=db.STALE_UNDATED_DAYS + 1)
+    assert db.search(conn, base=later) == []
+    assert len(db.search(conn, status="all", base=later)) == 1

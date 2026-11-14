@@ -8,6 +8,31 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+ICS_MAGIC = b"BEGIN:VCALENDAR"
+
+
+class UnsafePath(ValueError):
+    """ICS를 쓰기에 안전하지 않은 경로."""
+
+
+def safe_target(path: str | Path) -> Path:
+    """쓸 경로를 검증한다. 경로는 모델이 넘기는 값이라 임의 파일을 덮어쓰지 못하게 막는다.
+
+    - 확장자는 ``.ics`` 여야 한다.
+    - 이미 있는 파일은 ICS일 때만 덮어쓴다.
+    """
+    target = Path(path).expanduser()
+    if target.suffix.lower() != ".ics":
+        raise UnsafePath(f"ICS 경로는 .ics 로 끝나야 합니다: {target}")
+    if target.exists():
+        if not target.is_file():
+            raise UnsafePath(f"파일이 아닌 경로입니다: {target}")
+        with target.open("rb") as handle:
+            head = handle.read(len(ICS_MAGIC))
+        if head != ICS_MAGIC:
+            raise UnsafePath(f"ICS가 아닌 기존 파일은 덮어쓰지 않습니다: {target}")
+    return target
+
 
 def _escape(text: str) -> str:
     return (
@@ -85,7 +110,7 @@ def build(events: list[dict], *, alarm_days: int = 2, stamp: dt.date | None = No
 
 
 def write(events: list[dict], path: str | Path, *, alarm_days: int = 2) -> Path:
-    target = Path(path).expanduser()
+    target = safe_target(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(build(events, alarm_days=alarm_days).encode("utf-8"))
     return target

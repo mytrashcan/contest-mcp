@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from . import attachments, util
+from . import attachments, reuse, util
 
 LABELS: dict[str, tuple[str, ...]] = {
     "eligibility": (
@@ -133,6 +133,8 @@ def parse(html: str, url: str = "", base=None) -> dict:
         "fields": found,
         "missing": missing,
         "presentation": presented,
+        # 재출품·중복 응모 조항은 보통 '유의사항'에 있어 필드별 근거 창에 안 잡힌다 → 본문 전체에서 따로 모은다.
+        "reuse_clauses": reuse.detect_clauses(text),
         "attachments": attachments.extract_links(html, url)[:5],
         "text_chars": len(text),
     }
