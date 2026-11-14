@@ -199,6 +199,12 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
             else:
                 fresh["apply_end"] = existing["apply_end"]
                 fresh["apply_end_basis"] = existing["apply_end_basis"]
+        # 이번 목록에 날짜가 빠져서 왔다고 알던 날짜를 지우지 않는다(지워지면 '날짜 없는 공고'가 된다).
+        if not fresh["apply_end"] and existing["apply_end"]:
+            fresh["apply_end"] = existing["apply_end"]
+            fresh["apply_end_basis"] = existing["apply_end_basis"]
+        if not fresh["apply_start"] and existing["apply_start"]:
+            fresh["apply_start"] = existing["apply_start"]
 
         for field in TRACKED_FIELDS:
             old_value = existing[field]
@@ -306,6 +312,9 @@ def _group(rows: list[sqlite3.Row], base: dt.date) -> list[dict]:
         )[0]
         sources = sorted({r["source"] for r in group_rows})
         ends = sorted({r["apply_end"] for r in group_rows if r["apply_end"]})
+        # 상세 원문에서 확인한 날짜가 있으면 그 값이 우선한다. 없으면 소스들 중 가장 이른 날짜(보수적).
+        detail_end = best["apply_end"] if best["apply_end_basis"] == "detail" else None
+        end = detail_end or (ends[0] if ends else best["apply_end"])
         detail = json.loads(best["detail_json"]) if best["detail_json"] else None
         grouped.append(
             {
@@ -317,12 +326,12 @@ def _group(rows: list[sqlite3.Row], base: dt.date) -> list[dict]:
                 "field": best["field"],
                 "region": best["region"],
                 "apply_start": best["apply_start"],
-                "apply_end": ends[0] if ends else best["apply_end"],
+                "apply_end": end,
                 "apply_end_by_source": {
                     r["source"]: r["apply_end"] for r in group_rows if r["apply_end"]
                 },
-                "dday": util.dday_of(ends[0] if ends else best["apply_end"], base),
-                "status": util.status_of(best["apply_start"], ends[0] if ends else best["apply_end"], base),
+                "dday": util.dday_of(end, base),
+                "status": util.status_of(best["apply_start"], end, base),
                 "sources": sources,
                 "views": max((r["views"] or 0) for r in group_rows) or None,
                 "eligibility": best["eligibility"],
@@ -332,6 +341,12 @@ def _group(rows: list[sqlite3.Row], base: dt.date) -> list[dict]:
             }
         )
     return grouped
+
+
+def _open_clause(ref: dt.date) -> tuple[str, list[object]]:
+    """'진행 중' 조건. 마감일이 없는 공고는 목록에서 최근에 보인 것만 진행 중으로 친다."""
+    stale = (ref - dt.timedelta(days=STALE_UNDATED_DAYS)).isoformat()
+    return ("(apply_end >= ? OR (apply_end IS NULL AND last_seen >= ?))", [ref.isoformat(), stale])
 
 
 def search(
@@ -367,8 +382,9 @@ def search(
         clauses.append("region LIKE ?")
         params.append(f"%{region}%")
     if status == "open":
-        clauses.append("(apply_end >= ? OR (apply_end IS NULL AND last_seen >= ?))")
-        params.extend([ref.isoformat(), (ref - dt.timedelta(days=STALE_UNDATED_DAYS)).isoformat()])
+        clause, clause_params = _open_clause(ref)
+        clauses.append(clause)
+        params.extend(clause_params)
     elif status == "upcoming":
         clauses.append("apply_start > ?")
         params.append(ref.isoformat())
@@ -441,11 +457,19 @@ def get(conn: sqlite3.Connection, ident: str, base: dt.date | None = None) -> di
     row = _resolve(conn, (ident or "").strip())
     if row is None:
         return None
-    if row["group_id"]:
-        siblings = conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)).fetchall()
-    else:
-        siblings = [row]  # 이름이 정규화되면 빈 문자열인 행끼리는 같은 공고가 아니다
-    item = _group(siblings, base or util.today())[0]
+    ref = base or util.today()
+    pool: dict[str, sqlite3.Row] = {row["id"]: row}
+    if row["group_id"]:  # 정규화한 이름이 빈 문자열인 행끼리는 같은 공고가 아니다
+        for sibling in conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)):
+            pool.setdefault(sibling["id"], sibling)
+    # 진행 중인 공고는 search와 같은 기준(이름 토큰 포함관계)으로 묶어, 검색에서 본 묶음과 같게 한다.
+    # 마감된 공고까지 넣으면 회차만 다른 지난 공고와 합쳐질 수 있어, 그때는 이름이 같은 행만 본다.
+    if util.status_of(row["apply_start"], row["apply_end"], ref) != "closed":
+        clause, clause_params = _open_clause(ref)
+        for other in conn.execute(f"SELECT * FROM contest WHERE {clause}", clause_params):
+            pool.setdefault(other["id"], other)
+    item = next(group for group in _group(list(pool.values()), ref) if row["id"] in group["ids"])
+    siblings = [pool[contest_id] for contest_id in item["ids"]]
     # 상세는 대표 id에 저장된다(save_detail). 요청한 행이 대표가 아니어도 그 캐시를 읽어야 한다.
     by_id = {sibling["id"]: sibling for sibling in siblings}
     cached = [by_id[item["id"]], row, *siblings]

@@ -64,3 +64,7 @@ def test_dday_of_signed():
 def test_to_int():
     assert util.to_int("47,160") == 47160
     assert util.to_int(None) is None
+
+
+def test_clean_decodes_every_html_entity():
+    assert util.clean("AI&#8226;데이터 &ldquo;공모전&rdquo;&#x2F;해커톤") == "AI•데이터 “공모전”/해커톤"

@@ -199,3 +199,55 @@ def test_undated_contest_drops_out_when_no_longer_listed(tmp_path):
     later = BASE + dt.timedelta(days=db.STALE_UNDATED_DAYS + 1)
     assert db.search(conn, base=later) == []
     assert len(db.search(conn, status="all", base=later)) == 1
+
+
+def test_detail_date_wins_over_earlier_source_date(tmp_path):
+    """상세 원문에서 확인한 날짜가 있으면, 다른 소스의 더 이른 날짜보다 우선한다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(
+        conn,
+        [
+            _rec("wevity", "1", "A 공모전", "2026-11-19", basis="badge"),
+            _rec("thinkgood", "9", "A 공모전", "2026-11-21"),
+        ],
+        BASE,
+    )
+    db.save_detail(conn, "wevity:1", {"summary": ""}, apply_end="2026-11-25", base=BASE)
+    item = db.search(conn, dday_max=30, base=BASE)[0]
+    assert item["id"] == "wevity:1"
+    assert item["apply_end"] == "2026-11-25"
+    assert item["dday"] == 13
+    assert item["apply_end_by_source"] == {"wevity": "2026-11-25", "thinkgood": "2026-11-21"}
+
+
+def test_missing_list_date_does_not_erase_known_deadline(tmp_path):
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(conn, [_rec("wevity", "1", "A 공모전", "2026-11-20", apply_start="2026-11-01")], BASE)
+    db.upsert_many(conn, [_rec("wevity", "1", "A 공모전", None)], BASE)
+    row = conn.execute("SELECT apply_start, apply_end, apply_end_basis FROM contest").fetchone()
+    assert tuple(row) == ("2026-11-01", "2026-11-20", "list")
+    assert db.changes(conn, days=7, base=BASE) == []
+
+
+def test_get_groups_the_same_way_search_does(tmp_path):
+    """이름 해시가 달라도 토큰 포함관계로 묶인 공고는 get에서도 같은 묶음이어야 한다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    long_name = "한국보건의료정보원 2026년 제6회 진료정보교류 서비스 아이디어 공모전"
+    short_name = "제6회 진료정보교류 서비스 아이디어 공모전"
+    db.upsert_many(
+        conn,
+        [
+            _rec("wevity", "1", long_name, "2026-11-20"),
+            _rec("thinkgood", "9", short_name, "2026-11-20"),
+            _rec("allcon", "3", "제5회 진료정보교류 서비스 아이디어 공모전", "2025-11-20"),
+        ],
+        BASE,
+    )
+    searched = db.search(conn, dday_max=30, base=BASE)
+    assert len(searched) == 1
+    expected = sorted(searched[0]["ids"])
+    assert expected == ["thinkgood:9", "wevity:1"]
+    for ident in ("wevity:1", "thinkgood:9"):
+        assert sorted(db.get(conn, ident, BASE)["ids"]) == expected
+    # 마감된 지난 회차는 올해 공고와 합치지 않는다
+    assert db.get(conn, "allcon:3", BASE)["ids"] == ["allcon:3"]

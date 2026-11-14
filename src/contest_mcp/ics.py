@@ -8,6 +8,8 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+from . import util
+
 ICS_MAGIC = b"BEGIN:VCALENDAR"
 
 
@@ -65,7 +67,7 @@ def _fold(line: str) -> str:
 
 def build(events: list[dict], *, alarm_days: int = 2, stamp: dt.date | None = None) -> str:
     """events: [{date: 'YYYY-MM-DD', summary, description?, url?}]. 반환값은 CRLF ICS 문자열."""
-    now = (stamp or dt.date.today()).strftime("%Y%m%dT%H%M%SZ")
+    now = (stamp or util.today()).strftime("%Y%m%dT%H%M%SZ")  # PC 로컬 날짜가 아니라 서울 기준
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",

@@ -197,6 +197,18 @@ def enrich_with_text(parsed: dict, text: str, *, source: str = "attachment") -> 
     return parsed
 
 
+def carry_attachment_text(parsed: dict, previous: dict | None) -> dict:
+    """상세를 다시 받아도 이전에 첨부에서 얻은 텍스트와 그걸로 채운 항목을 잃지 않게 한다.
+
+    새로 받은 결과에 이미 첨부 텍스트가 있으면(방금 첨부를 다시 받은 경우) 건드리지 않는다.
+    """
+    text = (previous or {}).get("attachment_text")
+    if text and not parsed.get("attachment_text"):
+        parsed["attachment_text"] = text
+        enrich_with_text(parsed, text)
+    return parsed
+
+
 def fetch_and_parse(fetcher, url: str, base=None) -> dict:
     """상세 페이지를 받아 파싱. 네트워크 오류는 예외로 올린다."""
     html = fetcher.get(url)
