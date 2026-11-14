@@ -164,6 +164,14 @@ def test_excluded_status_is_not_passed():
     assert _axis(eligibility.check(text, PROFILE), "status")["verdict"] == "pass"
 
 
+def test_exclusion_at_end_of_list_or_with_particle_is_not_passed():
+    """'제외'가 나열 끝에 붙거나 조사 뒤에 오면 내 신분이 빠졌을 수 있다 → pass로 단정하지 않는다."""
+    for text in ("참가 대상: 대학생, 대학원생 제외", "참가 대상: 대학생을 제외한 일반인"):
+        assert _axis(eligibility.check(text, PROFILE), "status")["verdict"] == "unknown"
+    general = {**PROFILE, "status": "일반인"}
+    assert _axis(eligibility.check("참가 대상: 대학생을 제외한 일반인", general), "status")["verdict"] == "pass"
+
+
 def test_business_only_target_fails_but_mixed_target_does_not():
     assert _axis(eligibility.check("참가 대상: 소상공인 및 기업", PROFILE), "status")["verdict"] == "fail"
     assert _axis(eligibility.check("참가 대상: 기업 또는 일반인", PROFILE), "status")["verdict"] == "pass"

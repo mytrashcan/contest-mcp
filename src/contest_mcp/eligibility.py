@@ -50,7 +50,11 @@ _STUDENT = re.compile(r"(대학생|대학원생|학부생|고등학생|청소년
 _UNDERGRAD = frozenset({"대학생", "학부생"})
 _BUSINESS = frozenset({"기업", "소상공인"})
 # 신분 바로 뒤에 붙어 그 신분을 대상에서 빼는 표현("대학원생 제외", "일반인은 참가 불가").
-_EXCLUDED_AFTER = re.compile(r"\s*(?:은|는|도)?\s*(?:제외|(?:참가|응모|지원|신청)\s*불가)")
+_EXCLUDED_AFTER = re.compile(r"\s*(?:은|는|도|을|를|이|가)?\s*(?:제외|(?:참가|응모|지원|신청)\s*불가)")
+# 나열 끝에 붙은 제외("대학생, 대학원생 제외")는 앞 항목까지 걸리는지 문장만으로 알 수 없다.
+_EXCLUDED_IN_LIST = re.compile(
+    rf"(?:\s*(?:,|·|/|및|또는|혹은|이나|와|과)\s*{_STUDENT.pattern})+{_EXCLUDED_AFTER.pattern}"
+)
 _TEAM_MIN = re.compile(r"(\d)\s*[~\-]\s*(\d)\s*인")
 _TEAM_ONLY = re.compile(r"(\d)\s*인\s*이상\s*(?:팀|단체)")
 
@@ -211,11 +215,17 @@ def _check_status(text: str, profile: dict) -> dict:
     # 첫 단어만 보면 "대학생, 대학원생, 일반인"에서 뒤의 대상을 놓친다 → 나온 신분을 전부 모은다.
     allowed: list[str] = []
     excluded: list[str] = []
+    unclear: list[str] = []
     first: int | None = None
     for match in _STUDENT.finditer(text):
         if first is None:
             first = match.start()
-        bucket = excluded if _EXCLUDED_AFTER.match(text, match.end()) else allowed
+        if _EXCLUDED_AFTER.match(text, match.end()):
+            bucket = excluded
+        elif _EXCLUDED_IN_LIST.match(text, match.end()):
+            bucket = unclear
+        else:
+            bucket = allowed
         if match.group(1) not in bucket:
             bucket.append(match.group(1))
     if first is None:
@@ -229,6 +239,13 @@ def _check_status(text: str, profile: dict) -> dict:
     if same_as_me & set(excluded):
         # '제외'가 어느 범위에 걸리는지는 문장을 읽어야 안다 → fail로 단정하지 않는다.
         return _result("status", VERDICT_UNKNOWN, f"내 신분({mine})에 '제외' 문구가 붙어 있음 — 원문 확인", evidence)
+    if same_as_me & set(unclear):
+        return _result(
+            "status",
+            VERDICT_UNKNOWN,
+            f"내 신분({mine})이 '제외'로 끝나는 나열 안에 있음 — 제외 범위는 원문 확인",
+            evidence,
+        )
     if same_as_me & set(allowed) or "일반인" in allowed:
         return _result("status", VERDICT_PASS, f"'{listed}' 대상에 내 신분({mine})이 해당", evidence)
     if allowed and set(allowed) <= _BUSINESS and mine not in _BUSINESS:

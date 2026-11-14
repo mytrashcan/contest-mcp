@@ -207,6 +207,41 @@ def test_robots_cache_is_reused_then_expires():
     assert sum(url.endswith("/robots.txt") for url in expiring.requested) == 2
 
 
+def test_failed_robots_refresh_keeps_known_rules():
+    """만료 뒤 재확인이 일시적으로 실패해도, 알고 있던 Disallow를 '전부 허용'으로 바꾸지 않는다."""
+    fetcher = _CannedFetcher("User-agent: *\nDisallow: /private/\n")
+    fetcher.robots_ttl = 0
+    assert fetcher.get("https://example.com/a") == "ok"
+    fetcher.robots = http.FetchError("HTTP 503", status=503)
+    with pytest.raises(http.RobotsDenied):
+        fetcher.get("https://example.com/private/x")
+    assert fetcher.get("https://example.com/b") == "ok"
+    assert any("이전 규칙 유지" in note for note in fetcher.warnings)
+
+
+# ------------------------------------------------------------------ 내부 주소(축약 표기·조회 결과)
+def test_shorthand_ip_literals_are_internal():
+    for host in ("2130706433", "127.1", "0x7f000001", "0", "[::1]", "10.0.0.5"):
+        assert http.is_internal_host(host), host
+    for host in ("example.com", "cafe.de", "8.8.8.8", "www.all-con.co.kr"):
+        assert not http.is_internal_host(host), host
+
+
+def test_hosts_resolving_to_private_addresses_are_internal():
+    def private(host, port):
+        return [(2, 1, 6, "", ("93.184.216.34", 0)), (2, 1, 6, "", ("192.168.0.7", 0))]
+
+    def public(host, port):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    def failing(host, port):
+        raise OSError("조회 실패")
+
+    assert http.resolves_internally("rebind.example", private)
+    assert not http.resolves_internally("example.com", public)
+    assert not http.resolves_internally("nowhere.example", failing)
+
+
 # ------------------------------------------------------------------ 첨부 내용 보존
 def test_refetched_detail_keeps_attachment_findings():
     previous = {"attachment_text": "심사기준: 창의성 40점, 실현가능성 60점", "fields": {}}

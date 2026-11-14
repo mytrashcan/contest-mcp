@@ -5,7 +5,7 @@
 - 같은 호스트에는 최소 ``MIN_INTERVAL`` 초 간격을 둔다.
 - 인증서 체인이 불완전한 사이트는 ``insecure_hosts`` 에 명시한 경우에만 검증을 끄고,
   그 사실을 ``warnings`` 에 남긴다(조용히 무시하지 않는다).
-- http/https 가 아닌 주소(``file://`` 등)는 받지 않고, 응답 크기에 상한을 둔다.
+- http/https 가 아닌 주소(``file://`` 등)와 내부 주소(표기·조회 결과 모두)는 받지 않고, 응답 크기에 상한을 둔다.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import socket
 import ssl
 import time
 import urllib.error
@@ -32,19 +33,54 @@ ROBOTS_TTL = 6 * 60 * 60  # 서버가 오래 떠 있어도 robots.txt 변경을 
 INTERNAL_SUFFIXES = (".localhost", ".local", ".internal")
 
 
+_NUMERIC_HOST = re.compile(r"[0-9a-fx.]+")
+
+
+def _literal_address(name: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """호스트 문자열이 IP 표기면 주소로. ``2130706433`` · ``127.1`` · ``0x7f000001`` 같은 축약 표기도 푼다.
+
+    축약 표기는 ``ipaddress`` 가 거절하지만 운영체제는 그대로 127.0.0.1 로 연결하므로 따로 풀어야 한다.
+    """
+    try:
+        return ipaddress.ip_address(name.split("%", 1)[0])
+    except ValueError:
+        pass
+    if not _NUMERIC_HOST.fullmatch(name):
+        return None
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(name))
+    except (OSError, ValueError):
+        return None
+
+
 def is_internal_host(host: str) -> bool:
     """내 PC·사설망을 가리키는 호스트인지. 공고 페이지의 링크가 내부 주소를 찌르게 두지 않는다.
 
-    이름과 IP 표기만 본다(DNS 조회는 하지 않으므로, 공개 도메인이 사설 IP로 풀리는 경우는 막지 못한다).
+    여기서는 이름과 IP 표기만 본다. 공개 도메인이 사설 IP로 풀리는 경우는 ``resolves_internally`` 가 본다.
     """
     name = host.strip("[]").lower().rstrip(".")
     if not name or name == "localhost" or name.endswith(INTERNAL_SUFFIXES):
         return True
+    address = _literal_address(name)
+    return address is not None and not address.is_global
+
+
+def resolves_internally(host: str, resolver=socket.getaddrinfo) -> bool:
+    """호스트를 조회했을 때 내부 주소가 하나라도 나오는지.
+
+    조회 실패는 여기서 판단하지 않는다(요청 단계에서 어차피 실패한다).
+    조회와 실제 연결 사이에 DNS 응답이 바뀌는 경우까지는 막지 못한다.
+    """
     try:
-        address = ipaddress.ip_address(name)
-    except ValueError:
+        found = resolver(host, None)
+    except (OSError, UnicodeError):
         return False
-    return not address.is_global
+    for entry in found:
+        address = _literal_address(str(entry[4][0]))
+        if address is not None and not address.is_global:
+            return True
+    return False
+
 
 Rule = tuple[bool, str]  # (allow 여부, 경로 패턴)
 
@@ -144,6 +180,7 @@ class Fetcher:
         self._last_hit: dict[str, float] = {}
         self._robots: dict[str, list[Rule] | None] = {}
         self._robots_at: dict[str, float] = {}
+        self._resolved: dict[str, bool] = {}
 
     def _warn(self, note: str) -> None:
         if note not in self.warnings:
@@ -162,7 +199,13 @@ class Fetcher:
             # 4xx는 "robots.txt 없음"이라 막지 않는다. 그 밖의 실패(5xx·타임아웃)도 수집은 계속하되,
             # 확인하지 못했다는 사실을 조용히 넘기지 않고 경고로 남긴다.
             status = getattr(exc, "status", None)
-            if not (isinstance(status, int) and 400 <= status < 500):
+            missing = isinstance(status, int) and 400 <= status < 500
+            known = self._robots.get(host)
+            if known is not None and not missing:
+                # 다시 받다가 일시적으로 실패한 것이다. 알고 있던 규칙을 '전부 허용'으로 바꾸지 않는다.
+                self._warn(f"{host}: robots.txt 재확인 실패({exc}) → 이전 규칙 유지")
+                return known
+            if not missing:
                 self._warn(f"{host}: robots.txt 확인 실패({exc}) → 확인 없이 수집")
             self._robots[host] = None
             return None
@@ -193,6 +236,13 @@ class Fetcher:
         if is_internal_host(host):
             raise FetchError(f"내부 주소는 받지 않습니다: {url}")
 
+    def _check_resolved(self, host: str, url: str) -> None:
+        """공개 도메인처럼 보여도 내부 주소로 풀리면 받지 않는다. 호스트마다 한 번만 조회한다."""
+        if host not in self._resolved:
+            self._resolved[host] = resolves_internally(host)
+        if self._resolved[host]:
+            raise FetchError(f"내부 주소로 연결되는 호스트는 받지 않습니다: {url}")
+
     def _wait(self, host: str) -> None:
         last = self._last_hit.get(host)
         if last is not None:
@@ -210,6 +260,7 @@ class Fetcher:
     def _raw(self, url: str, *, headers: dict[str, str], data: bytes | None = None) -> bytes:
         parsed = urllib.parse.urlsplit(url)
         self._check_scheme(parsed, url)
+        self._check_resolved(parsed.hostname or "", url)
         self._wait(parsed.netloc)
         request = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT, **headers})
         try:
