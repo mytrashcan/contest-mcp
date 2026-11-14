@@ -135,6 +135,9 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def _row(record: dict, base: dt.date) -> dict:
     name = record["name"]
+    basis = record.get("apply_end_basis") or "list"
+    # 목록이 말한 날짜만 '목록 값'으로 기억한다. 상세에서 온 날짜를 섞으면 다음 목록 값이 '이동'으로 보인다.
+    listed = record.get("apply_end") if basis != "detail" else None
     return {
         "id": f"{record['source']}:{record['key']}",
         "source": record["source"],
@@ -146,8 +149,8 @@ def _row(record: dict, base: dt.date) -> dict:
         "field": record.get("field"),
         "apply_start": record.get("apply_start"),
         "apply_end": record.get("apply_end"),
-        "apply_end_basis": record.get("apply_end_basis") or "list",
-        "apply_end_list": record.get("apply_end"),
+        "apply_end_basis": basis,
+        "apply_end_list": listed,
         "status_raw": record.get("status_raw"),
         "views": record.get("views"),
         "eligibility": record.get("eligibility"),
@@ -184,7 +187,7 @@ def upsert_many(conn: sqlite3.Connection, records: list[dict], base: dt.date | N
 
         old_rank = BASIS_RANK.get(existing["apply_end_basis"] or "list", 0)
         new_rank = BASIS_RANK.get(fresh["apply_end_basis"], 0)
-        listed = fresh["apply_end"]
+        listed = fresh["apply_end_list"]
         previous_listed = existing["apply_end_list"]
         if not listed:
             fresh["apply_end_list"] = previous_listed  # 이번에 날짜가 안 왔으면 직전 목록 값을 유지
