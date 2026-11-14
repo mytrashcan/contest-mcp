@@ -70,6 +70,7 @@ def fetch(fetcher: Fetcher, *, max_pages: int = 5, base: dt.date | None = None) 
         raw = fetcher.post_json(API, body)
         rows = parse_response(raw, base)
         if not rows:
+            util.ensure_first_page(LABEL, page)
             break
         for row in rows:
             if row["status_raw"] == "마감":

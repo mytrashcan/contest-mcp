@@ -24,6 +24,8 @@ Claude Code에 등록:
 claude mcp add contest-mcp -s user -- "$(pwd)/.venv/bin/contest-mcp"
 ```
 
+Windows에서는 실행 파일이 `.venv\Scripts\contest-mcp.exe` 에 있습니다(위 명령의 경로만 바꾸면 됩니다).
+
 그다음 클라이언트에서 "contest-mcp로 공모전 좀 모아서 브리핑해줘"라고 하면 됩니다.
 처음이면 `refresh` → `digest` 순으로 호출됩니다.
 
@@ -73,6 +75,7 @@ python -m contest_mcp.cli reuse contestkorea:202610280017 --idea "아차맵 — 
 - 조항 탐지 패턴: 타 공모전·중복 응모/신청/참가·재출품·기출품·동일 작품·표절 등
 - 판정 4단계: `warn`(조항+유사) / `clause_only` / `similar_only` / `clear`
 - **첨부파일에만 있는 조항**도 잡습니다(`get_contest(include_attachments=True)`로 첨부 텍스트를 저장한 경우)
+- 조항은 필드별 근거 문장뿐 아니라 **본문 전체**에서 찾습니다. 본문을 확인하지 못했으면 결과에 `body_scanned: false` 가 붙습니다
 
 ## 첨부 파싱 (`include_attachments`)
 
@@ -98,6 +101,7 @@ python -m contest_mcp.cli reuse contestkorea:202610280017 --idea "아차맵 — 
 - 마감 연장(`2026-11-20 → 2026-11-27`), 시상 내역 변경, 제목 수정이 잡힙니다.
 - 같은 전이(20→27)는 한 번만 기록되고, 되돌림(27→20)은 별도로 기록됩니다.
 - 상세 원문 날짜가 배지 날짜를 이기는 경우는 `basis=detail`로 남겨 '변경'이 아니라 **정정**임을 구분합니다.
+- 상세로 확정된 공고도 **목록 날짜가 직전과 달라지면** 연장으로 기록하고, 상세 캐시를 만료시켜 다음 조회 때 원문을 다시 받습니다.
 
 ## 아침 브리핑 (`digest`)
 
@@ -193,7 +197,7 @@ cp profile.example.json ~/.contest-mcp/profile.json
 
 ## 저장 구조
 
-sqlite 한 파일(`~/.contest-mcp/db.sqlite`)에 4개 테이블.
+sqlite 한 파일(`~/.contest-mcp/db.sqlite`)에 5개 테이블.
 
 | 테이블 | 내용 |
 |---|---|
@@ -230,6 +234,13 @@ python -m contest_mcp.cli my-list --state submitted
 ## 설계 메모
 
 - **수집 예절**: 요청 전 `robots.txt` 확인(Disallow면 그 소스를 건너뛰고 이유를 남김), 호스트별 최소 1초 간격.
+  robots는 `*` 그룹(또는 `contest-mcp`를 지목한 그룹)의 `Allow`·`Disallow`·와일드카드를 경로+쿼리에 대조합니다.
+  robots.txt를 받지 못하면(404 제외) 수집은 계속하되 `warnings`에 남깁니다.
+- **안전장치**: `http`·`https`가 아닌 주소는 받지 않고, 응답 25MB·압축 해제 20MB 상한을 둡니다.
+  `deadlines`의 `ics_path`는 `.ics`로 끝나야 하며, ICS가 아닌 기존 파일은 덮어쓰지 않습니다.
+- **소스가 깨지면 오류로**: 첫 페이지에서 0건이면 "0건 수집"이 아니라 그 소스의 `error`로 보고합니다.
+- **ident는 추측하지 않음**: 여러 공고에 걸리는 값은 고르지 않고 후보 id를 돌려줍니다. 마감일 없는 공고는
+  목록에서 14일 넘게 안 보이면 진행 중에서 빠집니다.
   `www.all-con.co.kr`은 인증서 체인이 불완전해 검증 없이 수집하며, 그 사실을 결과의 `warnings`에 표시합니다.
 - **씽굿·올콘은 JSON API**: 씽굿 `subList.do`(POST JSON), 올콘 `ajax.contest_list.php`(폼 POST +
   `X-Requested-With`). 브라우저 없이 수집되고 행에 자격·상금·현황이 들어 있습니다.
@@ -258,7 +269,7 @@ python -m contest_mcp.cli my-list --state submitted
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest     # 94 tests — 네트워크 없이 파서·DB·ICS·자격·변경·재출품·첨부 검증
+.venv/bin/python -m pytest     # 네트워크 없이 파서·DB·ICS·자격·변경·재출품·첨부 검증
 .venv/bin/python -m ruff check src tests
 ```
 

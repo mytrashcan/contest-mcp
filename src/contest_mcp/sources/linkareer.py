@@ -83,6 +83,7 @@ def fetch(fetcher: Fetcher, *, max_pages: int = 5, base: dt.date | None = None) 
         raw = fetcher.get(DATA_URL.format(build_id=build_id, page=page))
         rows = parse_data(raw, ref)
         if not rows:
+            util.ensure_first_page(LABEL, page)
             break
         for row in rows:
             if row["apply_end"] and row["apply_end"] < ref.isoformat():

@@ -83,6 +83,7 @@ def fetch(
             )
             rows = parse_rows(raw, base)
             if not rows:
+                util.ensure_first_page(LABEL, page)
                 break
             for row in rows:
                 seen.setdefault(row["key"], row)

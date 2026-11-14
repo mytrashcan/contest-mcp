@@ -19,9 +19,11 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 EXTS = (".hwpx", ".docx", ".pdf", ".hwp", ".zip")
+# 압축을 푼 뒤 크기 상한. 작은 zip이 거대한 파일로 풀리는 경우(zip bomb)를 막는다.
+MAX_MEMBER_BYTES = 20 * 1024 * 1024
 _EXT_RE = re.compile(r"\.(hwpx|docx|pdf|hwp|zip)(?=$|[?#\s\"'<>])", re.I)
 _ANCHOR = re.compile(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.S | re.I)
 _TAG = re.compile(r"<[^>]+>")
@@ -44,6 +46,9 @@ def extract_links(html: str, base_url: str = "") -> list[dict]:
         if href.lower().startswith("javascript") or href.startswith("#"):
             continue  # JS 다운로드(씽굿 등)는 자동 수집 불가
         url = urljoin(base_url, href) if base_url else href
+        scheme = urlsplit(url).scheme.lower()
+        if scheme and scheme not in {"http", "https"}:
+            continue  # file:// 등 웹 주소가 아닌 링크는 받지 않는다
         if url in seen:
             continue
         seen.add(url)
@@ -62,19 +67,26 @@ def _xml_text(xml: str) -> str:
     return text.strip()
 
 
+def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
+    """zip 안의 파일 1개를 읽되, 풀린 크기가 상한을 넘으면 읽지 않는다."""
+    if archive.getinfo(name).file_size > MAX_MEMBER_BYTES:
+        raise ValueError(f"압축 해제 크기 초과(>{MAX_MEMBER_BYTES // (1024 * 1024)}MB): {name}")
+    return archive.read(name)
+
+
 def hwpx_text(data: bytes) -> str:
     """hwpx = zip + Contents/section*.xml (표준 라이브러리만)."""
     chunks: list[str] = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = sorted(n for n in archive.namelist() if re.match(r"Contents/section\d+\.xml$", n))
         for name in names:
-            chunks.append(_xml_text(archive.read(name).decode("utf-8", "replace")))
+            chunks.append(_xml_text(_read_member(archive, name).decode("utf-8", "replace")))
     return "\n".join(chunk for chunk in chunks if chunk).strip()
 
 
 def docx_text(data: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        return _xml_text(archive.read("word/document.xml").decode("utf-8", "replace"))
+        return _xml_text(_read_member(archive, "word/document.xml").decode("utf-8", "replace"))
 
 
 def _run(command: list[str], suffix: str, data: bytes, *, trailing: tuple[str, ...] = ()) -> tuple[str, str]:
@@ -144,7 +156,12 @@ def _extract(ext: str, data: bytes) -> tuple[str, str | None, str | None]:
                 inner_ext = _ext_of(name)
                 if inner_ext not in {".hwpx", ".docx", ".pdf"}:
                     continue
-                inner_text, inner_method, inner_error = _extract(inner_ext, archive.read(name))
+                try:
+                    payload = _read_member(archive, name)
+                except ValueError as exc:
+                    errors.append(str(exc))
+                    continue
+                inner_text, inner_method, inner_error = _extract(inner_ext, payload)
                 if inner_text:
                     texts.append(inner_text)
                     if inner_method:

@@ -80,6 +80,7 @@ TRACKED_FIELDS = ("name", "apply_start", "apply_end", "prize")
 
 BASIS_RANK = {"badge": 0, "list": 1, "detail": 2}
 MIN_MERGE_TOKENS = 3
+STALE_UNDATED_DAYS = 14
 
 
 def _mergeable(left: set[str], right: set[str]) -> bool:
@@ -341,10 +342,14 @@ def search(
     limit: int = 20,
     sort: str = "dday",
     base: dt.date | None = None,
+    include_undated: bool = True,
 ) -> list[dict]:
     """그룹 중복을 제거한 검색. ``status='all'`` 이면 마감 포함.
 
     ``sort``: ``dday``(마감 임박) · ``views_low``(조회 적은 순 = 경쟁 약함) · ``views_high`` · ``name``.
+
+    마감일이 없는 공고는 날짜로 닫을 수 없으므로, 목록에서 ``STALE_UNDATED_DAYS`` 일 넘게 안 보이면
+    진행 중으로 치지 않는다. ``include_undated=False`` 면 마감일 없는 공고를 아예 뺀다("D-N 이내" 용).
     """
     ref = base or util.today()
     clauses: list[str] = []
@@ -359,8 +364,8 @@ def search(
         clauses.append("region LIKE ?")
         params.append(f"%{region}%")
     if status == "open":
-        clauses.append("(apply_end IS NULL OR apply_end >= ?)")
-        params.append(ref.isoformat())
+        clauses.append("(apply_end >= ? OR (apply_end IS NULL AND last_seen >= ?))")
+        params.extend([ref.isoformat(), (ref - dt.timedelta(days=STALE_UNDATED_DAYS)).isoformat()])
     elif status == "upcoming":
         clauses.append("apply_start > ?")
         params.append(ref.isoformat())
@@ -374,6 +379,8 @@ def search(
         grouped = [item for item in grouped if item["status"] in {"open", "unknown"}]
     elif status == "upcoming":
         grouped = [item for item in grouped if item["status"] == "upcoming"]
+    if not include_undated:
+        grouped = [item for item in grouped if item["dday"] is not None]
     if dday_max is not None:
         grouped = [item for item in grouped if item["dday"] is None or item["dday"] <= dday_max]
     if sort == "views_low":
@@ -387,22 +394,62 @@ def search(
     return grouped[:limit]
 
 
+class AmbiguousIdent(ValueError):
+    """ident가 둘 이상의 공고에 걸린다 — 아무거나 고르면 엉뚱한 공고에 기록이 남는다."""
+
+    def __init__(self, ident: str, ids: list[str]) -> None:
+        self.ident = ident
+        self.ids = ids
+        shown = ", ".join(ids[:5])
+        super().__init__(f"'{ident}'에 해당하는 공고가 여러 개입니다({shown}). source:key 형태의 id로 지정하세요.")
+
+
+MIN_URL_FRAGMENT = 6  # 이보다 짧은 조각으로 URL 부분 일치를 하면 아무 공고나 걸린다
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _resolve(conn: sqlite3.Connection, ident: str) -> sqlite3.Row | None:
+    """ident → contest 행 1개. 정확 일치(id·url) → key 일치 → URL 부분 일치 순이며, 여러 개면 고르지 않는다."""
+    if not ident:
+        return None
+    for column in ("id", "url"):
+        row = conn.execute(f"SELECT * FROM contest WHERE {column} = ?", (ident,)).fetchone()
+        if row is not None:
+            return row
+    tail = ident.rstrip("/").rsplit("=", 1)[-1].strip()
+    if not tail:
+        return None
+    rows = conn.execute("SELECT * FROM contest WHERE key = ? LIMIT 6", (tail,)).fetchall()
+    if not rows and len(tail) >= MIN_URL_FRAGMENT:
+        rows = conn.execute(
+            "SELECT * FROM contest WHERE url LIKE ? ESCAPE '\\' LIMIT 6",
+            (f"%{_like_escape(tail)}%",),
+        ).fetchall()
+    if len(rows) > 1:
+        raise AmbiguousIdent(ident, [row["id"] for row in rows])
+    return rows[0] if rows else None
+
+
 def get(conn: sqlite3.Connection, ident: str, base: dt.date | None = None) -> dict | None:
-    """id·url·ix·contest_pk 어느 형태로도 조회."""
-    ident = (ident or "").strip()
-    row = conn.execute("SELECT * FROM contest WHERE id = ?", (ident,)).fetchone()
-    if row is None:
-        row = conn.execute("SELECT * FROM contest WHERE url = ?", (ident,)).fetchone()
-    if row is None:
-        tail = ident.rstrip("/").rsplit("=", 1)[-1]
-        row = conn.execute(
-            "SELECT * FROM contest WHERE key = ? OR url LIKE ? LIMIT 1", (tail, f"%{tail}%")
-        ).fetchone()
+    """id·url·ix·contest_pk 어느 형태로도 조회. 여러 공고에 걸리면 ``AmbiguousIdent`` 를 올린다."""
+    row = _resolve(conn, (ident or "").strip())
     if row is None:
         return None
-    siblings = conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)).fetchall()
+    if row["group_id"]:
+        siblings = conn.execute("SELECT * FROM contest WHERE group_id = ?", (row["group_id"],)).fetchall()
+    else:
+        siblings = [row]  # 이름이 정규화되면 빈 문자열인 행끼리는 같은 공고가 아니다
     item = _group(siblings, base or util.today())[0]
-    item["detail"] = json.loads(row["detail_json"]) if row["detail_json"] else None
+    # 상세는 대표 id에 저장된다(save_detail). 요청한 행이 대표가 아니어도 그 캐시를 읽어야 한다.
+    by_id = {sibling["id"]: sibling for sibling in siblings}
+    cached = [by_id[item["id"]], row, *siblings]
+    holder = next((candidate for candidate in cached if candidate["detail_json"]), None)
+    item["detail"] = json.loads(holder["detail_json"]) if holder is not None else None
+    if holder is not None:
+        item["detail_checked_at"] = holder["detail_at"]
     return item
 
 

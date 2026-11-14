@@ -120,7 +120,7 @@ def cmd_detail(args: argparse.Namespace) -> int:
 def cmd_deadlines(args: argparse.Namespace) -> int:
     conn = _open()
     try:
-        items = db.search(conn, dday_max=args.days, status="open", limit=200)
+        items = db.search(conn, dday_max=args.days, status="open", limit=200, include_undated=False)
         announcements = []
         if not args.no_announce:
             today = util.today()
@@ -423,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "json", False) and args.command == "detail":
         pass
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (db.AmbiguousIdent, ics.UnsafePath) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

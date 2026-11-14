@@ -56,7 +56,9 @@ def build(
     use_profile: bool = True,
 ) -> dict:
     ref = base or util.today()
-    items = db.search(conn, dday_max=days, status="open", limit=limit, sort="views_low", base=ref)
+    items = db.search(
+        conn, dday_max=days, status="open", limit=limit, sort="views_low", base=ref, include_undated=False
+    )
     recent_changes = db.changes(conn, days=days, base=ref)
     changes_by_contest: dict[str, list[dict]] = {}
     for change in recent_changes:
