@@ -549,6 +549,46 @@ def set_state(
     conn.commit()
 
 
+def add_manual_contest(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    host: str | None = None,
+    url: str | None = None,
+    apply_end: str | None = None,
+    field: str | None = None,
+    base: dt.date | None = None,
+) -> str:
+    """소스에 없는 공고를 직접 등록한다(`manual:` 네임스페이스).
+
+    공기업·지자체가 자체 접수하는 공모전은 수집 소스에 없으므로, 사용자가 이름만 주고
+    등록할 수 있어야 ``mark`` 로 제출 이력을 남길 수 있다. 같은 이름이면 같은 id 가 나온다.
+    """
+    clean = (name or "").strip()
+    if not clean:
+        raise ValueError("공고 이름이 비어 있습니다")
+    if apply_end is not None:
+        if not apply_end:
+            apply_end = None
+        else:
+            try:
+                dt.date.fromisoformat(apply_end)
+            except ValueError as exc:
+                raise ValueError(f"마감일은 YYYY-MM-DD 형식이어야 합니다: {apply_end}") from exc
+    key = util.group_id(clean)
+    cid = f"manual:{key}"
+    ref = (base or util.today()).isoformat()
+    conn.execute(
+        "INSERT INTO contest (id, source, key, group_id, name, host, url, field, apply_end, "
+        "apply_end_basis, first_seen, last_seen) VALUES (?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, host=excluded.host, url=excluded.url, "
+        "apply_end=COALESCE(excluded.apply_end, contest.apply_end), last_seen=excluded.last_seen",
+        (cid, key, key, clean, host or "", url or "", field, apply_end, "detail" if apply_end else None, ref, ref),
+    )
+    conn.commit()
+    return cid
+
+
 def my_list(
     conn: sqlite3.Connection,
     state: str | None = None,
