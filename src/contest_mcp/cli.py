@@ -21,6 +21,12 @@ def _print_json(data: object) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _dday_label(item: dict) -> str:
+    """마감일이 없거나 해석 불가한 공고도 출력이 죽지 않게 한다."""
+    dday = item.get("dday")
+    return f"D-{dday}" if dday is not None else "D-?"
+
+
 def cmd_refresh(args: argparse.Namespace) -> int:
     sources = [s.strip() for s in args.sources.split(",") if s.strip()] if args.sources else None
     report = refresh_sources(sources, max_pages=args.pages)
@@ -139,7 +145,7 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
             {
                 "date": item["apply_end"],
                 "summary": f"[마감] {item['name']}",
-                "description": f"{item['host']} · D-{item['dday']} · {'/'.join(item['sources'])}",
+                "description": f"{item['host']} · {_dday_label(item)} · {'/'.join(item['sources'])}",
                 "url": item["url"],
             }
             for item in items
@@ -160,7 +166,7 @@ def cmd_deadlines(args: argparse.Namespace) -> int:
         print(f"ICS 저장: {path} (마감 {dated}건 + 발표 추정 {len(announcements)}건)")
         return 0
     for item in items:
-        print(f"D-{item['dday']:>3} {item['apply_end']} | {item['name'][:60]}")
+        print(f"{_dday_label(item):>5} {item['apply_end'] or '날짜없음'} | {item['name'][:60]}")
     if announcements:
         print("\n발표일(원문 추정):")
         for event in announcements:
@@ -242,9 +248,29 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_mark(args: argparse.Namespace) -> int:
     conn = _open()
     try:
-        item = db.get(conn, args.ident)
+        item = None
+        if args.ident:
+            item = db.get(conn, args.ident)
+        if item is None and args.name:
+            # 수집 소스에 없는 공고(공기업·지자체 자체 접수)는 이름만 주면 직접 등록한다.
+            try:
+                new_id = db.add_manual_contest(
+                    conn,
+                    args.name,
+                    host=args.host,
+                    url=args.url,
+                    apply_end=args.apply_end,
+                )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            item = db.get(conn, new_id)
         if item is None:
-            print(f"공고를 찾을 수 없음: {args.ident}", file=sys.stderr)
+            if not args.ident:
+                print("공고 id 또는 --name 이 필요합니다.", file=sys.stderr)
+                return 2
+            hint = "" if args.name else " (소스에 없는 공고면 --name 으로 직접 등록)"
+            print(f"공고를 찾을 수 없음: {args.ident}{hint}", file=sys.stderr)
             return 1
         db.set_state(
             conn,
@@ -283,6 +309,8 @@ def cmd_my_list(args: argparse.Namespace) -> int:
         print(f"[{labels.get(row['state'], row['state'])}] {row['name'] or row['contest_id']}")
         print(f"    제출 {row['submitted_at'] or '-'} · 경로 {row['channel'] or '-'} · {proof} · 결과 {result}"
               f"{' · ' + row['note'] if row['note'] else ''}")
+        if row.get("result_note"):
+            print(f"    {row['result_note']}")
     print(f"\n총 {len(rows)}건")
     return 0
 
@@ -389,8 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
     chg.set_defaults(func=cmd_changes)
 
     mark = sub.add_parser("mark", help="내 상태·제출 이력 기록")
-    mark.add_argument("ident")
+    mark.add_argument("ident", nargs="?", help="공고 id (없는 공고면 --name 으로 등록)")
     mark.add_argument("state", choices=["submitted", "dropped", "skip"])
+    mark.add_argument("--name", help="소스에 없는 공고를 직접 등록할 때의 이름")
+    mark.add_argument("--host", help="--name 으로 등록할 때의 주최")
+    mark.add_argument("--url", help="--name 으로 등록할 때의 원문 주소")
+    mark.add_argument("--apply-end", dest="apply_end", help="--name 으로 등록할 때의 마감일 YYYY-MM-DD")
     mark.add_argument("--note")
     mark.add_argument("--submitted-at", dest="submitted_at", help="제출일 YYYY-MM-DD")
     mark.add_argument("--channel", choices=["email", "form", "site", "other"])
