@@ -174,11 +174,16 @@ def from_dday(text: object, base: dt.date | None = None) -> str | None:
 
 
 def wevity_deadline(badge: object, base: dt.date | None = None) -> str | None:
-    """위비티 D-day 배지를 마감일로. 배지가 마감일 당일을 포함하므로 하루 당긴다."""
+    """위비티 D-day 배지를 마감일로. 배지가 마감일 당일을 포함하므로 하루 당긴다.
+
+    ``D-DAY``·``D-0``은 배지가 곧 마감 당일이라 당기지 않는다. 이 둘까지 당기면 당일 마감
+    공고가 하루 이른 날짜가 되어 ``status_of``가 'closed'로 판정하고 마감 목록에서 사라진다.
+    """
     iso = from_dday(badge, base)
     if not iso:
         return None
-    if not _DDAY.search(clean(badge)):
+    match = _DDAY.search(clean(badge))
+    if not match or int(match.group(1)) == 0:
         return iso
     return (dt.date.fromisoformat(iso) - dt.timedelta(days=1)).isoformat()
 

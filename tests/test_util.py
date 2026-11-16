@@ -48,6 +48,14 @@ def test_wevity_dday_is_shifted_one_day_earlier():
     assert util.wevity_deadline("", BASE) is None
 
 
+def test_wevity_dday_zero_is_not_shifted():
+    """D-0은 D-DAY와 같은 뜻이라 하루 당기면 당일 마감 공고가 '마감'으로 표시된다."""
+    assert util.wevity_deadline("D-0", BASE) == "2026-11-12"
+    assert util.wevity_deadline("D - 0", BASE) == "2026-11-12"
+    assert util.wevity_deadline("D-DAY", BASE) == "2026-11-12"
+    assert util.status_of(None, util.wevity_deadline("D-0", BASE), BASE) == "open"
+
+
 def test_status_of():
     assert util.status_of(None, "2026-11-20", BASE) == "open"
     assert util.status_of(None, "2026-11-01", BASE) == "closed"
