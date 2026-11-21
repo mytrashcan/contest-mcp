@@ -95,7 +95,7 @@ def build(
             )
             badges.append(f"변경: {labels}")
 
-        lines.append(f"{index}. D-{item['dday']} · {item['name']}")
+        lines.append(f"{index}. {util.dday_label(item['dday'])} · {item['name']}")
         lines.append(f"   {' · '.join(badges)}")
         rows.append({"id": item["id"], "name": item["name"], "dday": item["dday"], "badges": badges})
 

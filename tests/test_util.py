@@ -76,3 +76,25 @@ def test_to_int():
 
 def test_clean_decodes_every_html_entity():
     assert util.clean("AI&#8226;데이터 &ldquo;공모전&rdquo;&#x2F;해커톤") == "AI•데이터 “공모전”/해커톤"
+
+
+def test_clean_drops_html_comments_with_inner_tags():
+    """주석 안에 태그가 있으면 예전엔 '-->' 조각이 근거 문장에 남았다."""
+    assert util.clean("제출서류 <!-- <div>x</div> --> 확인") == "제출서류 확인"
+
+
+def test_dday_label_never_prints_double_minus():
+    assert util.dday_label(None) == "D-?"
+    assert util.dday_label(7) == "D-7"
+    assert util.dday_label(0) == "D-0"
+    assert util.dday_label(-1) == "D+1"
+    assert util.dday_label(-11) == "D+11"
+
+
+def test_norm_region_collapses_spaced_names_only():
+    assert util.norm_region("대 구") == "대구"
+    assert util.norm_region("  서울특별시 ") == "서울특별시"
+    assert util.norm_region("서울 경기") == "서울 경기"  # 낱말이 두 글자면 붙이지 않는다
+    assert util.norm_region("") is None
+    assert util.norm_region(None) is None
+

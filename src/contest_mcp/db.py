@@ -499,6 +499,13 @@ def save_detail(
             "UPDATE contest SET apply_end = ?, apply_end_basis = 'detail' WHERE id = ?",
             (apply_end, contest_id),
         )
+    # 지역은 상세 표(대회지역)에서만 얻는다. 이미 값이 있으면 덮지 않는다.
+    region = util.norm_region(detail.get("region")) if isinstance(detail, dict) else None
+    if region:
+        conn.execute(
+            "UPDATE contest SET region = ? WHERE id = ? AND (region IS NULL OR region = '')",
+            (region, contest_id),
+        )
     conn.commit()
 
 
