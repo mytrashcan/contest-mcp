@@ -246,7 +246,7 @@ def build_server():
                 {
                     "date": item["apply_end"],
                     "summary": f"[마감] {item['name']}",
-                    "description": f"{item['host']} · D-{item['dday']} · {'/'.join(item['sources'])}",
+                    "description": f"{item['host']} · {util.dday_label(item['dday'])} · {'/'.join(item['sources'])}",
                     "url": item["url"],
                 }
                 for item in items
