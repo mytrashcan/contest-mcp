@@ -7,7 +7,7 @@ import datetime as dt
 import json
 import sys
 
-from . import attachments, db, detail, eligibility, ics, profile, reuse, util
+from . import attachments, db, detail, eligibility, ics, profile, reuse, util, watch
 from . import digest as digest_report
 from .http import Fetcher
 from .server import db_path, refresh_sources
@@ -371,6 +371,45 @@ def cmd_reuse(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    only = [name.strip() for name in args.sources.split(",") if name.strip()] if args.sources else None
+    conn = _open()
+    try:
+        report = watch.check(fetcher=Fetcher(), conn=conn, only=only, baseline=args.baseline)
+    finally:
+        conn.close()
+    if args.json:
+        _print_json(report)
+        return 0
+
+    new = report["new"]
+    if not new:
+        if args.quiet:
+            # 크론용: 새 소식도 없고 전부 죽은 것도 아니면 침묵한다.
+            if report["all_failed"]:
+                print("⚠️ 공모전 결과 감시 실패 — 모든 소스 접속 불가: " + ", ".join(report["failures"]))
+            return 0
+        print(f"새 소식 없음 — {report['checked']}개 소스 점검")
+        if report["baselined"]:
+            print(f"  기준선 저장: {', '.join(report['baselined'])}")
+        for name in report["failures"]:
+            print(f"  ! 확인 실패 {name}")
+        if report["all_failed"]:
+            print("⚠️ 모든 소스 접속 실패 — 감시가 비어 있습니다")
+        return 0
+
+    print(f"🎯 공모전 결과·발표 새 소식 {len(new)}건")
+    for item in new[:12]:
+        stamp = f" ({item['date']})" if item.get("date") else ""
+        print(f"[{item['source']}] {item['title']}{stamp}")
+        if item.get("evidence"):
+            print(f"  근거: {item['evidence']}")
+        print(f"  {item['url']}")
+    for name in report["failures"]:
+        print(f"  ! 확인 실패 {name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="contest", description="contest-mcp CLI")
     parser.add_argument("--json", action="store_true", help="JSON으로 출력")
@@ -448,6 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
     reusecmd.add_argument("ident")
     reusecmd.add_argument("--idea", help="지금 내려는 아이디어 이름")
     reusecmd.set_defaults(func=cmd_reuse)
+
+    watchcmd = sub.add_parser("watch", help="제출한 공모전 결과·발표 감시 (1회 점검)")
+    watchcmd.add_argument("--sources", help="쉼표 구분 소스 이름 (생략하면 전체)")
+    watchcmd.add_argument("--baseline", action="store_true", help="지금 상태를 기준선으로 다시 저장(알림 없음)")
+    watchcmd.add_argument("--quiet", action="store_true", help="새 소식이 없으면 아무것도 출력하지 않음(크론용)")
+    watchcmd.set_defaults(func=cmd_watch)
 
     return parser
 

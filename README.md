@@ -29,7 +29,7 @@ Windows에서는 실행 파일이 `.venv\Scripts\contest-mcp.exe` 에 있습니�
 그다음 클라이언트에서 "contest-mcp로 공모전 좀 모아서 브리핑해줘"라고 하면 됩니다.
 처음이면 `refresh` → `digest` 순으로 호출됩니다.
 
-## 툴 12개
+## 툴 14개
 
 | 툴 | 하는 일 |
 |---|---|
@@ -44,6 +44,33 @@ Windows에서는 실행 파일이 `.venv\Scripts\contest-mcp.exe` 에 있습니�
 | `add_idea` / `ideas` | 내가 낸 아이디어(작품) 등록·조회 — 재출품 감지용 |
 | `check_reuse` | **재출품 금지 조항** 탐지 + 내 아이디어 유사도 경고 |
 | `check_eligibility` | 자격을 프로필과 대조해 **학교·지역·나이·신분·팀** 5축 pass/fail/unknown 판정 |
+| `watch_run` | 제출한 공모전의 **결과·발표 소식 1회 점검**. 지난 점검 이후 새 글만 반환 |
+| `watch_status` | 감시 소스·마지막 점검 시각·소스별 저장 건수·실패 내역 |
+
+## 결과 발표 감시 (`watch_run` · `watch_status`)
+
+제출해 놓고 결과 발표를 놓치는 걸 막는 기능인데, **스케줄러는 넣지 않았습니다.**
+MCP 서버는 클라이언트가 띄운 stdio 프로세스라 세션이 끝나면 함께 종료됩니다. 서버 안에
+주기 실행을 넣으면 "돌고 있다고 믿은 감시"가 조용히 죽습니다. 그래서 여기에는 1회 점검만
+있고, 주기는 부르는 쪽(에이전트 cron·launchd)이 정합니다.
+
+```bash
+python -m contest_mcp.cli watch            # 1회 점검 (사람용 출력)
+python -m contest_mcp.cli watch --quiet    # 크론용: 새 소식 없으면 아무것도 출력하지 않음
+python -m contest_mcp.cli watch --baseline # 지금 상태를 기준선으로 다시 저장(알림 없음)
+```
+
+- **처음 보는 소스는 기준선만 저장하고 알리지 않습니다.** 첫 실행에서 과거 글이 쏟아지지 않게.
+- 게시판 4곳(대구 탄소중립센터·성평등 AI 챌린지·KEIT·K-Petro)은 목록의 `<tr>` 한 줄을 한 항목으로 보고,
+  칸 경계로 쪼개 가장 긴 조각을 제목으로 씁니다. `결과/수상/선정/시상` 같은 말이 있는 글만 잡습니다.
+  `발표`는 `발표심사`와 겹쳐서 일부러 넣지 않았습니다.
+- 공고 3건(성평등·사회보장·재정교육)은 상세 파서의 일정 문구를 감시합니다. 근거에 `D-13`·`접수중`처럼
+  사이트 목록·배너 흔적이 붙은 문구는 버립니다(다른 공모전 발표일이 섞이는 걸 막음).
+- **KSPO(kspo.or.kr)는 robots.txt가 `Disallow: /`** 라 감시 목록에서 뺐습니다. 수집 예절을 코드로 고정한
+  원칙(아래 설계 메모)을 감시에도 그대로 적용합니다.
+- JS로 목록을 그리는 사이트(ksponco·data1window·ex.co.kr)는 정적 HTML에 글이 없어 넣지 않았습니다.
+  그쪽은 개별 통보·이메일로 오는 경로에서 잡는 게 맞습니다.
+- 상태 파일: `CONTEST_MCP_WATCH` 환경변수 또는 `~/.contest-mcp/watch.json`.
 
 ## 제출·증빙 이력 (`mark` · `my_list`)
 
@@ -224,6 +251,7 @@ python -m contest_mcp.cli reuse wevity:112316 --idea "아차맵"   # 재출품 �
 python -m contest_mcp.cli idea add "아차맵" --contest-id wevity:112316
 python -m contest_mcp.cli my-list --missing-proof              # 증빙 미확인 제출건
 python -m contest_mcp.cli changes --days 7                     # 최근 변경
+python -m contest_mcp.cli watch --quiet                        # 결과·발표 감시 1회 점검 (크론용)
 python -m contest_mcp.cli deadlines --days 14 --ics ~/Downloads/contest.ics
 python -m contest_mcp.cli mark wevity:112316 submitted --note "11/12 접수"
 python -m contest_mcp.cli my-list --state submitted
