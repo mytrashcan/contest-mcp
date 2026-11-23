@@ -371,8 +371,82 @@ def cmd_reuse(args: argparse.Namespace) -> int:
     return 0
 
 
+def _watch_add_targets(args: argparse.Namespace, state: dict) -> list[str]:
+    added: list[str] = []
+    if args.add_url:
+        watch.add_target(state, "url", args.add_url, match=args.match, label=args.label)
+        added.append(watch.target_id("url", args.add_url))
+    if args.add_contest:
+        for ident in [item.strip() for item in args.add_contest.split(",") if item.strip()]:
+            watch.add_target(state, "contest", ident, label=args.label)
+            added.append(watch.target_id("contest", ident))
+    if args.add_query:
+        for query in [item.strip() for item in args.add_query.split(",") if item.strip()]:
+            watch.add_target(state, "query", query, label=args.label)
+            added.append(watch.target_id("query", query))
+    if args.from_my_submissions:
+        conn = _open()
+        try:
+            rows = db.my_list(conn, state="submitted")
+        finally:
+            conn.close()
+        for row in rows:
+            ident = row["contest_id"]
+            # URL이 DB에 있는 공고만 '공모전 감시'로 등록된다(사이트 무관, 원문 일정 감시).
+            if row.get("url"):
+                watch.add_target(state, "contest", ident)
+                added.append(watch.target_id("contest", ident))
+    return added
+
+
+def _print_watch_targets(rows: list[dict]) -> None:
+    if not rows:
+        print("등록된 감시 대상이 없습니다 — --add-url · --add-contest · --add-query 로 추가하세요.")
+        return
+    for row in rows:
+        label = f" [{row['label']}]" if row.get("label") else ""
+        match = f" match={row['match']}" if row.get("match") else ""
+        print(f"{row['index']:>2}. {row['kind']}{label} {row['value']}")
+        print(f"    저장 {row['keys']}건{match}")
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
-    only = [name.strip() for name in args.sources.split(",") if name.strip()] if args.sources else None
+    state = watch.load_state()
+
+    if args.list:
+        rows = watch.list_targets(state)
+        if args.json:
+            _print_json(rows)
+        else:
+            _print_watch_targets(rows)
+        return 0
+
+    if args.remove:
+        removed = watch.remove_target(state, args.remove)
+        watch.save_state(state)
+        if args.json:
+            _print_json({"removed": removed})
+        else:
+            print("삭제했습니다: " + args.remove if removed else "그런 감시 대상이 없습니다: " + args.remove)
+        return 0 if removed else 1
+
+    added = _watch_add_targets(args, state)
+    if added:
+        watch.save_state(state)
+        rows = watch.list_targets(state)
+        if args.json:
+            _print_json({"added": added, "targets": rows})
+            return 0
+        print(f"감시 대상 {len(added)}건 등록 — 이제 `watch`로 1회 점검하면 기준선이 잡힙니다.")
+        _print_watch_targets(rows)
+        return 0
+
+    if args.refresh:
+        refresh_report = refresh_sources(max_pages=args.pages)
+        if not args.json:
+            print(f"[{refresh_report['date']}] 수집 {refresh_report['total']}건 / 마감 전 {refresh_report['open']}건")
+
+    only = [item.strip() for item in args.only.split(",") if item.strip()] if args.only else None
     conn = _open()
     try:
         report = watch.check(fetcher=Fetcher(), conn=conn, only=only, baseline=args.baseline)
@@ -387,24 +461,32 @@ def cmd_watch(args: argparse.Namespace) -> int:
         if args.quiet:
             # 크론용: 새 소식도 없고 전부 죽은 것도 아니면 침묵한다.
             if report["all_failed"]:
-                print("⚠️ 공모전 결과 감시 실패 — 모든 소스 접속 불가: " + ", ".join(report["failures"]))
+                print("⚠️ 공모전 감시 실패 — 모든 대상 접속 불가: " + ", ".join(report["failures"]))
             return 0
-        print(f"새 소식 없음 — {report['checked']}개 소스 점검")
-        if report["baselined"]:
-            print(f"  기준선 저장: {', '.join(report['baselined'])}")
+        if report.get("note"):
+            print(report["note"])
+            return 0
+        print(f"새 소식 없음 — 감시 대상 {report['checked']}개 점검")
+        for ident in report["baselined"]:
+            print(f"  기준선 저장: {ident}")
         for name in report["failures"]:
             print(f"  ! 확인 실패 {name}")
         if report["all_failed"]:
-            print("⚠️ 모든 소스 접속 실패 — 감시가 비어 있습니다")
+            print("⚠️ 모든 대상 접속 실패 — 감시가 비어 있습니다")
         return 0
 
-    print(f"🎯 공모전 결과·발표 새 소식 {len(new)}건")
+    print(f"🎯 공모전 새 소식 {len(new)}건")
     for item in new[:12]:
-        stamp = f" ({item['date']})" if item.get("date") else ""
-        print(f"[{item['source']}] {item['title']}{stamp}")
+        head = f"[{item['kind']}" + (f" · {item['label']}" if item.get("label") else "") + "]"
+        stamp = ""
+        if item.get("date"):
+            # 검색 감시의 date는 마감일이다 — 발표일로 오해하지 않게 라벨을 붙인다.
+            stamp = f" (마감 {item['date']})" if item.get("kind") == "query" else f" ({item['date']})"
+        print(f"{head} {item['title']}{stamp}")
         if item.get("evidence"):
             print(f"  근거: {item['evidence']}")
-        print(f"  {item['url']}")
+        if item.get("url"):
+            print(f"  {item['url']}")
     for name in report["failures"]:
         print(f"  ! 확인 실패 {name}")
     return 0
@@ -488,10 +570,21 @@ def build_parser() -> argparse.ArgumentParser:
     reusecmd.add_argument("--idea", help="지금 내려는 아이디어 이름")
     reusecmd.set_defaults(func=cmd_reuse)
 
-    watchcmd = sub.add_parser("watch", help="제출한 공모전 결과·발표 감시 (1회 점검)")
-    watchcmd.add_argument("--sources", help="쉼표 구분 소스 이름 (생략하면 전체)")
+    watchcmd = sub.add_parser("watch", help="범용 감시: 새 공모전·공고 일정·결과 발표 (1회 점검)")
+    watchcmd.add_argument("--add-url", dest="add_url", help="임의 페이지 등록 (어느 주최든)")
+    watchcmd.add_argument("--add-contest", dest="add_contest", help="내 DB 공모전 id 등록 (쉼표 구분)")
+    watchcmd.add_argument("--add-query", dest="add_query", help="검색어 등록 — 조건에 맞는 새 공고 알림")
+    watchcmd.add_argument("--from-my-submissions", dest="from_my_submissions", action="store_true",
+                          help="제출한 공모전(URL 있는 건)을 한 번에 등록")
+    watchcmd.add_argument("--match", help="URL 감시에서 알릴 줄의 정규식 (기본: 결과·수상·선정·시상)")
+    watchcmd.add_argument("--label", help="사람이 알아볼 이름")
+    watchcmd.add_argument("--list", action="store_true", help="등록된 감시 대상 보기")
+    watchcmd.add_argument("--remove", help="삭제할 대상 id 또는 목록 번호")
+    watchcmd.add_argument("--only", help="이번 점검에서 특정 대상만 (id 쉼표 구분)")
     watchcmd.add_argument("--baseline", action="store_true", help="지금 상태를 기준선으로 다시 저장(알림 없음)")
     watchcmd.add_argument("--quiet", action="store_true", help="새 소식이 없으면 아무것도 출력하지 않음(크론용)")
+    watchcmd.add_argument("--refresh", action="store_true", help="점검 전에 소스 수집(refresh) 먼저")
+    watchcmd.add_argument("--pages", type=int, default=3, help="--refresh 시 소스별 최대 페이지")
     watchcmd.set_defaults(func=cmd_watch)
 
     return parser

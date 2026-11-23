@@ -496,47 +496,77 @@ def build_server():
             conn.close()
 
     @mcp.tool()
-    def watch_run(baseline: bool = False, sources: list[str] | None = None) -> dict:
-        """제출한 공모전의 결과·발표 소식을 **1회** 점검한다.
+    def watch_add(
+        kind: Literal["url", "contest", "query"],
+        value: str,
+        match: str | None = None,
+        label: str | None = None,
+        from_my_submissions: bool = False,
+    ) -> dict:
+        """감시 대상을 등록한다. 공모전은 어디서든 열리므로 사이트를 코드에 박지 않고 데이터로 등록한다.
+
+        Args:
+            kind: ``url``(임의 페이지) · ``contest``(내 DB 공모전 id) · ``query``(검색어)
+            value: kind에 해당하는 값 (URL·공모전 id·검색어)
+            match: url 감시에서 알릴 줄의 정규식. 기본은 결과·수상·선정·시상·당첨·입상
+            label: 사람이 알아볼 이름
+            from_my_submissions: True면 제출한 공모전(URL 있는 건)을 한꺼번에 등록
+        """
+        state = watch.load_state()
+        added: list[str] = []
+        if from_my_submissions:
+            conn = _connect()
+            try:
+                rows = db.my_list(conn, state="submitted")
+            finally:
+                conn.close()
+            for row in rows:
+                if row.get("url"):
+                    watch.add_target(state, "contest", row["contest_id"], label=label)
+                    added.append(watch.target_id("contest", row["contest_id"]))
+        watch.add_target(state, kind, value, match=match, label=label)
+        added.append(watch.target_id(kind, value))
+        watch.save_state(state)
+        return {"added": added, "targets": watch.list_targets(state)}
+
+    @mcp.tool()
+    def watch_remove(target: str) -> dict:
+        """감시 대상 삭제. ``target`` 은 id(``url:...``) 또는 목록 번호(1부터)."""
+        state = watch.load_state()
+        removed = watch.remove_target(state, target)
+        watch.save_state(state)
+        return {"removed": removed, "targets": watch.list_targets(state)}
+
+    @mcp.tool()
+    def watch_run(baseline: bool = False, refresh: bool = False) -> dict:
+        """등록된 감시 대상을 **1회** 점검한다. 지난 점검 이후 새 항목만 돌려준다.
 
         스케줄러가 아니다 — 주기는 부르는 쪽(에이전트·OS cron)이 정한다.
-        게시판 5곳과 내 공고 3건의 일정 문구를 보고, 지난 점검 이후 새 글만 돌려준다.
-        처음 보는 소스는 기준선만 저장하고 알리지 않는다.
+        처음 보는 대상은 기준선만 저장하고 알리지 않는다.
 
         Args:
             baseline: True면 알림 없이 지금 상태를 기준선으로 다시 저장한다.
-            sources: 특정 소스만 점검할 때의 이름 목록(생략하면 전체).
+            refresh: True면 점검 전에 소스 목록 수집(refresh)부터 실행한다. 검색(query) 감시에 필요.
         """
+        if refresh:
+            refresh_sources(max_pages=3)
         conn = _connect()
         try:
-            return watch.check(fetcher=_fetcher(), conn=conn, baseline=baseline, only=sources)
+            return watch.check(fetcher=_fetcher(), conn=conn, baseline=baseline)
         finally:
             conn.close()
 
     @mcp.tool()
     def watch_status() -> dict:
-        """감시 중인 소스, 마지막 점검 시각, 소스별 저장 건수와 실패 내역을 보여준다.
+        """감시 대상 목록, 마지막 점검 시각, 대상별 저장 건수와 실패 내역을 보여준다.
 
         사이트 구조가 바뀌면 조용히 0건이 될 수 있으므로 가끔 확인한다.
         """
         state = watch.load_state()
-        raw = state.get("sources")
-        entries: dict = raw if isinstance(raw, dict) else {}
-        sources = []
-        for name in [source.name for source in watch.BOARD_SOURCES] + list(watch.DETAIL_SOURCES):
-            found = entries.get(name)
-            entry: dict = found if isinstance(found, dict) else {}
-            sources.append(
-                {
-                    "name": name,
-                    "keys": len(entry.get("keys") or []),
-                    "items": entry.get("items"),
-                }
-            )
         return {
             "last_run": state.get("last_run"),
             "last_failures": state.get("last_failures") or [],
-            "sources": sources,
+            "targets": watch.list_targets(state),
             "state_path": str(watch.watch_path()),
         }
 

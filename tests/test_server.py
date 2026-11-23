@@ -22,6 +22,8 @@ EXPECTED_TOOLS = {
     "add_idea",
     "ideas",
     "check_reuse",
+    "watch_add",
+    "watch_remove",
     "watch_run",
     "watch_status",
 }
