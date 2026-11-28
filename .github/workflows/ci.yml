@@ -27,3 +27,27 @@ jobs:
         run: .venv/bin/python -m ruff check src tests
       - name: Test (파서·DB·ICS·서버 등록 — 네트워크 없이)
         run: .venv/bin/python -m pytest -q
+
+  timewarp:
+    name: 시간 이동 (${{ matrix.year }}년에도 통과하는가)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 날짜 픽스처가 '오늘'에 의존하면 여기서 깨진다. 리터럴을 정적으로 훑는 대신 행동을 본다.
+        year: ["2028", "2030", "2035"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Create venv and install
+        run: |
+          uv venv --python 3.12
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: 시계를 ${{ matrix.year }}년으로 돌려 스위트 실행
+        env:
+          TIMEWARP_YEAR: ${{ matrix.year }}
+          PYTHONPATH: src:tests
+        run: .venv/bin/python -m pytest -q -p timewarp_plugin
