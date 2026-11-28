@@ -140,7 +140,12 @@ def parse_date(value: object, base: dt.date | None = None) -> str | None:
 
 
 def parse_period(value: object, base: dt.date | None = None) -> tuple[str | None, str | None]:
-    """``26.08.10~26.12.11`` · ``2026.11.2 ~ 11.16`` 같은 기간 문자열을 (시작, 끝)으로."""
+    """``26.08.10~26.12.11`` · ``2026.11.2 ~ 11.16`` 같은 기간 문자열을 (시작, 끝)으로.
+
+    꼬리에 연도가 없으면 **시작의 연도**를 쓴다(``2026.12.20~01.05`` → 2027-01-05).
+    ``today()``의 연도를 쓰면 시간이 흐른 뒤 결과가 달라진다 — 2030년에 같은 문자열을
+    넣으면 끝이 2030-01-05가 되어 해를 넘긴 기간이 아니게 된다(2026-11-28 수정).
+    """
     if value is None:
         return (None, None)
     text = clean(value)
@@ -153,11 +158,14 @@ def parse_period(value: object, base: dt.date | None = None) -> tuple[str | None
             return (parse_date(dates[0], base), parse_date(dates[1], base))
         return (parse_date(text, base), None)
     start = parse_date(head, base)
-    end = parse_date(tail, base)
-    if start and end and end < start:
+    if not start:
+        # 시작을 못 읽으면 꼬리만 읽는다(연도 생략 시 base 연도).
+        return (None, parse_date(tail, base))
+    start_date = dt.date.fromisoformat(start)
+    end = parse_date(tail, start_date)
+    if end and end < start:
         # 연도가 생략된 기간(2026.12.20~01.05)은 해를 넘긴 것으로 본다.
-        bumped = parse_date(tail, dt.date(dt.date.fromisoformat(start).year + 1, 1, 1))
-        end = bumped or end
+        end = parse_date(tail, dt.date(start_date.year + 1, 1, 1)) or end
     return (start, end)
 
 
