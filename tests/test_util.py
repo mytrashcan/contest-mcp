@@ -76,3 +76,34 @@ def test_to_int():
 
 def test_clean_decodes_every_html_entity():
     assert util.clean("AI&#8226;데이터 &ldquo;공모전&rdquo;&#x2F;해커톤") == "AI•데이터 “공모전”/해커톤"
+
+
+def _fake_datetime_at(year: int):
+    """`datetime.datetime` 대역 — `.now()` 가 지정한 연도의 고정 시각을 돌려준다."""
+    real = dt.datetime
+    stamp = real(year, 6, 15, 12, 0, 0)
+
+    class FakeDateTime(real):  # type: ignore[misc, valid-type]
+        @classmethod
+        def now(cls, tz=None):
+            return stamp
+
+    return FakeDateTime
+
+
+def test_parse_period_end_year_comes_from_start_not_today(monkeypatch):
+    """꼬리에 연도가 없을 때 '오늘'의 연도를 쓰면 시간이 흐른 뒤 결과가 달라진다.
+
+    2026-11-28 회귀: 2030년에 같은 문자열을 넣으면 끝이 2030-01-05가 됐다(= 해를 넘긴 기간이 아님).
+    """
+    for year in (2026, 2030, 2035):
+        monkeypatch.setattr(util.dt, "datetime", _fake_datetime_at(year))
+        assert util.parse_period("2026.12.20~01.05") == ("2026-12-20", "2027-01-05"), year
+    monkeypatch.undo()
+
+
+def test_parse_period_uses_given_base_for_both_ends():
+    # 명시 base 가 있으면 연도 생략 꼬리는 base 연도로 읽는다(기존 동작 보존)
+    assert util.parse_period("11.02~11.16", dt.date(2026, 10, 1)) == ("2026-11-02", "2026-11-16")
+    # 시작을 못 읽으면 꼬리만 돌려준다
+    assert util.parse_period("미정~11.16", dt.date(2026, 10, 1)) == (None, "2026-11-16")
