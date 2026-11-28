@@ -23,8 +23,7 @@ def _print_json(data: object) -> None:
 
 def _dday_label(item: dict) -> str:
     """마감일이 없거나 해석 불가한 공고도 출력이 죽지 않게 한다."""
-    dday = item.get("dday")
-    return f"D-{dday}" if dday is not None else "D-?"
+    return util.dday_label(item.get("dday"))
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
@@ -65,9 +64,11 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 0
     if not items:
         print("조건에 맞는 공고가 없습니다.")
+        if args.region:
+            print("  지역 값은 상세 표의 '대회지역'에서만 채웁니다 — 지역 정보가 없는 소스는 결과에서 빠집니다.")
         return 0
     for item in items:
-        dday = f"D-{item['dday']}" if item["dday"] is not None else "D-?"
+        dday = util.dday_label(item["dday"])
         flag = " [제출함]" if submitted.intersection(item["ids"]) else ""
         views = f" 조회 {item['views']:,}" if item.get("views") else ""
         print(f"{dday:>6} {item['apply_end'] or '날짜없음'} | {item['name'][:60]}")
@@ -110,7 +111,12 @@ def cmd_detail(args: argparse.Namespace) -> int:
         _print_json({**item, "detail": parsed})
         return 0
     print(f"{item['name']}\n{item['host'] or '-'} · {item['url']}")
-    print(f"마감 {item['apply_end'] or '미상'} (D-{item['dday']}) · 출처 {'/'.join(item['sources'])}")
+    region_value = item.get("region") or parsed.get("region")
+    region_text = f" · 지역 {region_value}" if region_value else ""
+    print(
+        f"마감 {item['apply_end'] or '미상'} ({util.dday_label(item['dday'])})"
+        f"{region_text} · 출처 {'/'.join(item['sources'])}"
+    )
     if parsed.get("summary"):
         print(f"\n요약: {parsed['summary']}")
     print(f"\n확인된 항목 ({len(parsed['fields'])}):")

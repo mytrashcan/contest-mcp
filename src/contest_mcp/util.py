@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 SEOUL = ZoneInfo("Asia/Seoul")
 
 _TAG = re.compile(r"<[^>]+>")
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
 _WS = re.compile(r"\s+")
 _GROUP_NOISE = re.compile(r"\[[^\]]{0,24}\]|\([^)]{0,24}\)")
 _NON_NAME = re.compile(r"[^0-9a-z가-힣]+")
@@ -51,6 +52,7 @@ def clean(text: object) -> str:
         return ""
     # 엔티티는 전부 푼다(&#8226; · &ldquo; · &#x2F; 등). 몇 개만 풀면 나머지가 제목 병합·조항 탐지에 섞인다.
     out = html.unescape(str(text))
+    out = _COMMENT.sub(" ", out)  # 주석 안의 태그 때문에 '-->' 조각이 남는 걸 막는다
     out = _TAG.sub(" ", out)
     out = out.replace("\ufeff", "").replace("\u200b", "")
     return _WS.sub(" ", out).strip()
@@ -223,6 +225,33 @@ def dday_of(apply_end: str | None, base: dt.date | None = None) -> int | None:
     except ValueError:
         return None
     return (end - (base or today())).days
+
+
+def dday_label(dday: int | None) -> str:
+    """마감 표기 라벨. 지난 마감은 ``D+2``로 뒤집어 쓴다.
+
+    ``f"D-{dday}"`` 로 바로 찍으면 지난 공고가 ``D--1`` 처럼 깨져 보인다.
+    """
+    if dday is None:
+        return "D-?"
+    if dday >= 0:
+        return f"D-{dday}"
+    return f"D+{-dday}"
+
+
+def norm_region(value: object) -> str | None:
+    """상세 표의 지역 값을 필터용 짧은 이름으로. ``대 구`` → ``대구``.
+
+    글자 사이에 공백을 넣어 표기하는 사이트가 있어(콘테스트코리아 ``대 구``) 낱말이 모두
+    한 글자일 때만 붙인다. 그 외에는 표기 그대로 둔다(``서울 경기`` → 그대로).
+    """
+    text = re.sub(r"\s+", " ", clean(value)).strip(" .·,()[]")
+    if not text:
+        return None
+    tokens = text.split(" ")
+    if len(tokens) > 1 and all(len(token) == 1 for token in tokens):
+        text = "".join(tokens)
+    return text or None
 
 
 def to_int(value: object) -> int | None:

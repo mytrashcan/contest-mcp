@@ -251,3 +251,26 @@ def test_get_groups_the_same_way_search_does(tmp_path):
         assert sorted(db.get(conn, ident, BASE)["ids"]) == expected
     # 마감된 지난 회차는 올해 공고와 합치지 않는다
     assert db.get(conn, "allcon:3", BASE)["ids"] == ["allcon:3"]
+
+
+def test_save_detail_fills_region_once(tmp_path):
+    """지역은 상세 표에서 채우되, 이미 값이 있으면 덮지 않는다."""
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(conn, [_rec("contestkorea", "1", "A 공모전", "2026-11-30")], BASE)
+    db.save_detail(conn, "contestkorea:1", {"summary": "", "region": "대 구"}, base=BASE)
+    assert db.get(conn, "contestkorea:1", BASE)["region"] == "대구"
+    db.save_detail(conn, "contestkorea:1", {"summary": "", "region": "부산"}, base=BASE)
+    assert db.get(conn, "contestkorea:1", BASE)["region"] == "대구"
+
+
+def test_search_by_region_matches_only_populated_rows(tmp_path):
+    conn = db.connect(tmp_path / "t.sqlite")
+    db.upsert_many(
+        conn,
+        [
+            _rec("contestkorea", "1", "대구 공모전", "2026-11-30", region="대구"),
+            _rec("wevity", "2", "지역 미상 공모전", "2026-11-30"),
+        ],
+        BASE,
+    )
+    assert [row["name"] for row in db.search(conn, region="대구", base=BASE)] == ["대구 공모전"]
